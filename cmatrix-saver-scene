@@ -3,15 +3,18 @@
 # fades the window in from transparent (the desktop "dims" to black), plays
 # a short decrypt-style title, then runs cmatrix under a throwaway tmux
 # server. On the primary monitor ($CMATRIX_SAVER_PRIMARY=1) the title is
-# "<host> \\ idle" and a status bar shows host, idle time, battery, date
-# and clock; other monitors decrypt "HH:MM \\ dd mon" and get no bar.
+# "<host> \\ idle" and a status bar shows host, now playing, idle time,
+# battery, date and clock; other monitors decrypt "HH:MM \\ dd mon" and get
+# no bar. On battery at or below CMATRIX_SAVER_LOW_BATTERY percent (20) it
+# skips all of that and just goes black, to save power.
 #
-# `cmatrix-saver-scene battery|idle` are the status-bar segments; tmux
-# calls back into this script for them every second.
+# `cmatrix-saver-scene battery|idle|nowplaying` are the status-bar segments;
+# tmux calls back into this script for them every second.
 
 SELF=$(readlink -f "$0")
 KITTEN=${KITTEN:-kitten}
 PRIMARY=${CMATRIX_SAVER_PRIMARY:-1}
+LOW=${CMATRIX_SAVER_LOW_BATTERY:-20}
 
 battery() {
   local b pct status colour='#666666' mark=''
@@ -19,11 +22,55 @@ battery() {
     [[ -r $b/capacity ]] || continue
     pct=$(<"$b/capacity")
     status=$(<"$b/status")
-    ((pct <= 20)) && colour='#ff4444'
+    ((pct <= LOW)) && colour='#ff4444'
     [[ $status == Charging ]] && mark=' ⚡'
     printf '#[fg=%s]BAT %s%%%s' "$colour" "$pct" "$mark"
     return
   done
+}
+
+# 0 if running on battery at or below $LOW percent
+low_battery() {
+  local b
+  for b in /sys/class/power_supply/BAT*; do
+    [[ -r $b/capacity ]] || continue
+    [[ $(<"$b/status") == Discharging ]] && (($(<"$b/capacity") <= LOW))
+    return
+  done
+  return 1
+}
+
+# "♪ artist - title" from the first MPRIS player that's playing (Spotify,
+# browsers, mpv...); nothing when none is. ## keeps tmux from reading a #
+# in a title as a format.
+nowplaying() {
+  [[ ${CMATRIX_SAVER_NOWPLAYING:-1} == 1 ]] || return
+  python3 - 2>/dev/null <<'EOF'
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+names = bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
+    "org.freedesktop.DBus", "ListNames", None, None, 0, -1, None).unpack()[0]
+for name in sorted(n for n in names if n.startswith("org.mpris.MediaPlayer2.")):
+    try:
+        get = lambda prop: bus.call_sync(name, "/org/mpris/MediaPlayer2",
+            "org.freedesktop.DBus.Properties", "Get",
+            GLib.Variant("(ss)", ("org.mpris.MediaPlayer2.Player", prop)),
+            None, 0, 500, None).unpack()[0]
+        if get("PlaybackStatus") != "Playing":
+            continue
+        meta = get("Metadata")
+    except Exception:
+        continue
+    title = meta.get("xesam:title") or ""
+    artist = ", ".join(meta.get("xesam:artist") or [])
+    text = f"{artist} - {title}" if artist and title else title or artist
+    if text:
+        text = text if len(text) <= 48 else text[:47] + "…"
+        print("♪ " + text.replace("#", "##"))
+        break
+EOF
 }
 
 idle() {
@@ -84,7 +131,15 @@ decrypt() {
 case ${1:-} in
 battery) battery; exit ;;
 idle) idle; exit ;;
+nowplaying) nowplaying; exit ;;
 esac
+
+if low_battery; then
+  fade_in &
+  printf '\e[?25l\e[2J' # no title, no rain, no cursor: just black
+  wait
+  exec sleep infinity
+fi
 
 fade_in &
 decrypt
@@ -108,9 +163,9 @@ exec tmux -L "cmatrix-saver-${CMATRIX_SAVER_SLOT:-0}" -f /dev/null \
   set -g status-interval 1 \; \
   set -g status-style 'bg=#000000,fg=#444444' \; \
   set -g status-left-length 40 \; \
-  set -g status-right-length 80 \; \
+  set -g status-right-length 140 \; \
   set -g status-left '#[fg=#000000,bg=#cc2222,bold] #h #[default] ' \; \
-  set -g status-right "#[fg=#666666]#($SELF idle)  #($SELF battery)  #[fg=#444444]%a %d %b  #[fg=#cc2222,bold]%H:%M:%S " \; \
+  set -g status-right "#[fg=#cc2222]#($SELF nowplaying)  #[fg=#666666]#($SELF idle)  #($SELF battery)  #[fg=#444444]%a %d %b  #[fg=#cc2222,bold]%H:%M:%S " \; \
   set -g window-status-format '' \; \
   set -g window-status-current-format '' \; \
   new-session -s saver cmatrix

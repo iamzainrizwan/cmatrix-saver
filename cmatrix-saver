@@ -3,9 +3,9 @@
 #
 # Polls Mutter's IdleMonitor; after IDLE_SECS of no input it opens a
 # fullscreen kitty on every monitor running cmatrix-saver-scene (fade-in +
-# decrypt title, then default-colour cmatrix — the saver's kitty remaps ANSI
-# green to grey, so no green — with a tmux status bar: host, idle, battery,
-# clock). CMATRIX_SAVER_GREEN=1 keeps your terminal's own green.
+# decrypt title, then cmatrix in your terminal's own colours —
+# CMATRIX_SAVER_GREY=1 turns the green rain grey — with a tmux status bar:
+# host, now playing, idle, battery, clock).
 # Any key/mouse input resets the idle timer and this loop kills the windows.
 # (Not cmatrix -s: kitty's startup terminal replies count as a "keystroke"
 # and it quits instantly.) Skips triggering while something holds an
@@ -18,8 +18,9 @@
 # displays. CMATRIX_SAVER_SINGLE=1 restores the old single native window.
 #
 # Run via cmatrix-saver.service (systemd user unit, see README).
-# `cmatrix-saver test` counts down from 5, then shows it once regardless
-# of idle time.
+# `cmatrix-saver now` shows it straight away (bind it to a shortcut) and
+# `cmatrix-saver test` counts down from 5 first; both show it once,
+# regardless of idle time, and exit when it closes.
 # GNOME's own blank/lock (Settings > Power > Screen Blank) must be set
 # longer than IDLE_SECS, or the screen blanks before cmatrix shows.
 
@@ -77,9 +78,9 @@ launch() {
     -o background=#000000 -o window_padding_width=0
     -o background_opacity=0 -o dynamic_background_opacity=yes
     -o allow_remote_control=socket-only)
-  # cmatrix draws its rain in ANSI green and its heads in white: map them
-  # to dark/mid grey and off-white so it looks the same in any kitty.conf
-  [[ ${CMATRIX_SAVER_GREEN:-0} == 1 ]] || common+=(
+  # cmatrix draws its rain in ANSI green and its heads in white: optionally
+  # map them to dark/mid grey and off-white, whatever kitty.conf says
+  [[ ${CMATRIX_SAVER_GREY:-0} == 1 ]] && common+=(
     -o color2=#333333 -o color10=#666666
     -o color7=#e0e0e0 -o foreground=#e0e0e0)
   local mons x y primary n=0
@@ -115,16 +116,29 @@ close_all() {
   pids=()
 }
 
+# Saver windows from any instance (the idle service, or `now`/`test`), so
+# the two never stack a second set of windows on top of the first.
+running() {
+  pgrep -u "$UID" -f -- '--class cmatrix-saver' >/dev/null
+}
+
 trap 'close_all; exit' INT TERM
 
-if [[ $1 == test ]]; then
+case $1 in
+now)
+  running && exit 0
+  sleep 0.5 # let the shortcut's keys come up before the windows open
+  launch
+  ;;
+test)
   for i in 5 4 3 2 1; do
     printf '\rcmatrix-saver in %d… ' "$i"
     sleep 1
   done
   printf '\r\e[K'
   launch
-fi
+  ;;
+esac
 
 # dismissed: the windows went away without any input (quit with q, or
 # kitty failed to start). Don't relaunch until the user actually comes
@@ -145,8 +159,8 @@ while sleep "$POLL"; do
     elif ((idle < prev)); then
       close_all
     fi
-    ((${#pids[@]} == 0)) && [[ $1 == test ]] && exit 0
-  elif ((!dismissed && idle >= IDLE_SECS * 1000)) && ! idle_inhibited && ! locked; then
+    ((${#pids[@]} == 0)) && [[ $1 == now || $1 == test ]] && exit 0
+  elif ((!dismissed && idle >= IDLE_SECS * 1000)) && ! idle_inhibited && ! locked && ! running; then
     launch
   fi
   prev=$idle

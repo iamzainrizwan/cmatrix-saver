@@ -3,14 +3,21 @@
 A `cmatrix` screensaver for GNOME on Wayland, which has no screensaver hooks of
 its own.
 
-After 5 minutes without input, a fullscreen [kitty](https://sw.kovidgoyal.net/kitty/)
-window opens on every monitor. The desktop fades to black, a title decrypts out
-of scrambled glyphs, and then `cmatrix` runs in grey on pure black (made for
-OLED screens). Any key press or mouse movement closes it.
+![cmatrix-saver: a red title decrypts, then green cmatrix rain with a status bar](assets/demo.gif)
+
+After 5 minutes without input, or straight away from a keyboard shortcut, a
+fullscreen [kitty](https://sw.kovidgoyal.net/kitty/) window opens on every
+monitor. The desktop fades to black, a title decrypts out of scrambled glyphs,
+and then `cmatrix` runs in your terminal's colours. Any key press or mouse
+movement closes it.
 
 - **Primary monitor:** decrypts `<hostname> \\ idle`, then shows a status bar
-  with the hostname, idle time, battery, date and a clock.
+  with the hostname, what's playing, idle time, battery, date and a clock.
 - **Other monitors:** decrypt the current time and date, then plain `cmatrix`.
+- **Now playing:** the track from whichever media player is playing (Spotify,
+  a browser, mpv: anything that speaks MPRIS).
+- **Low battery:** on battery at 20% or less, it shows plain black instead of
+  animating, to save power.
 - It doesn't trigger while something is inhibiting idle (a playing video, a
   presentation) or while the screen is locked.
 
@@ -51,10 +58,24 @@ appears.
 ## Usage
 
 ```sh
+cmatrix-saver now                             # show it straight away
 cmatrix-saver test                            # counts down from 5, then shows it once
 systemctl --user restart cmatrix-saver        # pick up edits
 journalctl --user -u cmatrix-saver -n 20      # it didn't show? check here
 ```
+
+### Start it from a shortcut
+
+In **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts**,
+add a shortcut with this command, using your own home directory (GNOME doesn't
+expand `~` here):
+
+```
+/home/you/.local/bin/cmatrix-saver now
+```
+
+It waits half a second for you to let go of the keys, then opens. If the saver
+is already showing, it does nothing.
 
 ## Configuration
 
@@ -70,7 +91,9 @@ Environment=CMATRIX_SAVER_IDLE=600
 |---|---|---|
 | `CMATRIX_SAVER_IDLE` | `300` | seconds of no input before it starts |
 | `CMATRIX_SAVER_TITLE` | `<hostname> \\ idle` | title decrypted on the primary monitor |
-| `CMATRIX_SAVER_GREEN` | `0` | `1` keeps your terminal's own green instead of the grey rain |
+| `CMATRIX_SAVER_GREY` | `0` | `1` turns the green rain grey (dark grey trail, off-white heads), whatever your kitty colours are |
+| `CMATRIX_SAVER_NOWPLAYING` | `1` | `0` hides the now-playing track |
+| `CMATRIX_SAVER_LOW_BATTERY` | `20` | at or below this battery %, while discharging, show plain black instead |
 | `CMATRIX_SAVER_SINGLE` | `0` | `1` opens one native Wayland window instead of one per monitor |
 
 ## How it works
