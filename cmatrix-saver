@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# cmatrix "screensaver" for GNOME/Wayland (which has no screensaver hooks).
+#
+# Polls Mutter's IdleMonitor; after IDLE_SECS of no input it opens a
+# fullscreen kitty on every monitor running cmatrix-saver-scene (fade-in +
+# decrypt title, then default-colour cmatrix — the saver's kitty remaps ANSI
+# green to grey, so no green — with a tmux status bar: host, idle, battery,
+# clock). CMATRIX_SAVER_GREEN=1 keeps your terminal's own green.
+# Any key/mouse input resets the idle timer and this loop kills the windows.
+# (Not cmatrix -s: kitty's startup terminal replies count as a "keystroke"
+# and it quits instantly.) Skips triggering while something holds an
+# idle inhibitor (video playback, presentations) or the screen is locked.
+#
+# One window per monitor: Mutter has no layer-shell and ignores client
+# positions for native Wayland windows, so each kitty runs under XWayland
+# with --position inside its monitor and fullscreens there. Trade-off:
+# XWayland renders at 1x, so text is slightly soft on fractionally scaled
+# displays. CMATRIX_SAVER_SINGLE=1 restores the old single native window.
+#
+# Run via cmatrix-saver.service (systemd user unit, see README).
+# `cmatrix-saver test` counts down from 5, then shows it once regardless
+# of idle time.
+# GNOME's own blank/lock (Settings > Power > Screen Blank) must be set
+# longer than IDLE_SECS, or the screen blanks before cmatrix shows.
+
+IDLE_SECS=${CMATRIX_SAVER_IDLE:-300}
+POLL=2
+# Prefer kitty's official installer location (~/.local/bin): systemd's PATH
+# doesn't include it, and distro packages (e.g. Ubuntu's 0.32) are too old
+# for --position, so every launch would fail instantly.
+KITTY=$HOME/.local/bin/kitty
+[[ -x $KITTY ]] || KITTY=$(command -v kitty)
+KITTEN="$(dirname "$(readlink -f "$KITTY")")/kitten"
+SCENE="$(dirname "$(readlink -f "$0")")/cmatrix-saver-scene"
+export KITTEN
+pids=()
+
+idle_ms() {
+  gdbus call --session --dest org.gnome.Mutter.IdleMonitor \
+    --object-path /org/gnome/Mutter/IdleMonitor/Core \
+    --method org.gnome.Mutter.IdleMonitor.GetIdletime 2>/dev/null |
+    grep -oE '[0-9]+' | tail -1
+}
+
+# 8 = GSM_INHIBITOR_FLAG_IDLE
+idle_inhibited() {
+  gdbus call --session --dest org.gnome.SessionManager \
+    --object-path /org/gnome/SessionManager \
+    --method org.gnome.SessionManager.IsInhibited 8 2>/dev/null | grep -q true
+}
+
+locked() {
+  gdbus call --session --dest org.gnome.ScreenSaver \
+    --object-path /org/gnome/ScreenSaver \
+    --method org.gnome.ScreenSaver.GetActive 2>/dev/null | grep -q true
+}
+
+# "x y primary" (top-left in logical px, 1 if GNOME's primary display) of
+# each monitor, from Mutter's DisplayConfig.
+monitors() {
+  python3 - 2>/dev/null <<'EOF'
+import gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio
+bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+state = bus.call_sync(
+    "org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig",
+    "org.gnome.Mutter.DisplayConfig", "GetCurrentState",
+    None, None, 0, -1, None).unpack()
+for x, y, _scale, _transform, primary, *_ in state[2]:
+    print(x, y, int(primary))
+EOF
+}
+
+launch() {
+  local common=(--class cmatrix-saver --start-as fullscreen
+    -o background=#000000 -o window_padding_width=0
+    -o background_opacity=0 -o dynamic_background_opacity=yes
+    -o allow_remote_control=socket-only)
+  # cmatrix draws its rain in ANSI green and its heads in white: map them
+  # to dark/mid grey and off-white so it looks the same in any kitty.conf
+  [[ ${CMATRIX_SAVER_GREEN:-0} == 1 ]] || common+=(
+    -o color2=#333333 -o color10=#666666
+    -o color7=#e0e0e0 -o foreground=#e0e0e0)
+  local mons x y primary n=0
+  [[ ${CMATRIX_SAVER_SINGLE:-0} == 1 ]] || mapfile -t mons < <(monitors)
+
+  if ((${#mons[@]} == 0)); then
+    CMATRIX_SAVER_PRIMARY=1 "$KITTY" "${common[@]}" \
+      --listen-on "unix:@cmatrix-saver-$$" "$SCENE" &
+    pids+=($!)
+    return
+  fi
+  # the scene gives the primary monitor the host title + status bar; the
+  # others decrypt the time/date instead and run bare cmatrix
+  for m in "${mons[@]}"; do
+    read -r x y primary <<<"$m"
+    CMATRIX_SAVER_SLOT=$n CMATRIX_SAVER_PRIMARY=$primary \
+      "$KITTY" -o linux_display_server=x11 \
+      --position "$((x + 50))x$((y + 50))" "${common[@]}" \
+      --listen-on "unix:@cmatrix-saver-$$-$n" "$SCENE" &
+    pids+=($!)
+    ((n++)) # not inside the & command: that runs in a subshell
+  done
+}
+
+alive() {
+  local p
+  for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && return 0; done
+  return 1
+}
+
+close_all() {
+  ((${#pids[@]})) && kill "${pids[@]}" 2>/dev/null
+  pids=()
+}
+
+trap 'close_all; exit' INT TERM
+
+if [[ $1 == test ]]; then
+  for i in 5 4 3 2 1; do
+    printf '\rcmatrix-saver in %d… ' "$i"
+    sleep 1
+  done
+  printf '\r\e[K'
+  launch
+fi
+
+# dismissed: the windows went away without any input (quit with q, or
+# kitty failed to start). Don't relaunch until the user actually comes
+# back — otherwise a broken launch retries every poll for as long as
+# they're away.
+prev=0
+dismissed=0
+while sleep "$POLL"; do
+  idle=$(idle_ms) || continue
+  [[ -z $idle ]] && continue
+  ((idle < prev)) && dismissed=0 # idle timer reset: input
+
+  if ((${#pids[@]})); then
+    if ! alive; then
+      pids=()
+      dismissed=1
+      echo "saver windows closed without input; waiting for activity" >&2
+    elif ((idle < prev)); then
+      close_all
+    fi
+    ((${#pids[@]} == 0)) && [[ $1 == test ]] && exit 0
+  elif ((!dismissed && idle >= IDLE_SECS * 1000)) && ! idle_inhibited && ! locked; then
+    launch
+  fi
+  prev=$idle
+done

@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# What runs inside each cmatrix-saver kitty window (one per monitor):
+# fades the window in from transparent (the desktop "dims" to black), plays
+# a short decrypt-style title, then runs cmatrix under a throwaway tmux
+# server. On the primary monitor ($CMATRIX_SAVER_PRIMARY=1) the title is
+# "<host> \\ idle" and a status bar shows host, idle time, battery, date
+# and clock; other monitors decrypt "HH:MM \\ dd mon" and get no bar.
+#
+# `cmatrix-saver-scene battery|idle` are the status-bar segments; tmux
+# calls back into this script for them every second.
+
+SELF=$(readlink -f "$0")
+KITTEN=${KITTEN:-kitten}
+PRIMARY=${CMATRIX_SAVER_PRIMARY:-1}
+
+battery() {
+  local b pct status colour='#666666' mark=''
+  for b in /sys/class/power_supply/BAT*; do
+    [[ -r $b/capacity ]] || continue
+    pct=$(<"$b/capacity")
+    status=$(<"$b/status")
+    ((pct <= 20)) && colour='#ff4444'
+    [[ $status == Charging ]] && mark=' ⚡'
+    printf '#[fg=%s]BAT %s%%%s' "$colour" "$pct" "$mark"
+    return
+  done
+}
+
+idle() {
+  local ms
+  ms=$(gdbus call --session --dest org.gnome.Mutter.IdleMonitor \
+    --object-path /org/gnome/Mutter/IdleMonitor/Core \
+    --method org.gnome.Mutter.IdleMonitor.GetIdletime 2>/dev/null |
+    grep -oE '[0-9]+' | tail -1)
+  [[ -n $ms ]] || return
+  printf 'idle %02d:%02d' $((ms / 60000)) $((ms / 1000 % 60))
+}
+
+# Step the window's background from transparent to black. Needs the
+# remote-control socket cmatrix-saver opens per window ($KITTY_LISTEN_ON).
+fade_in() {
+  [[ -n ${KITTY_LISTEN_ON:-} ]] || return
+  local o
+  for o in 0.05 0.1 0.15 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0; do
+    "$KITTEN" @ set-background-opacity "$o" >/dev/null 2>&1
+    sleep 0.06
+  done
+}
+
+# Centred title that resolves left-to-right out of scrambled glyphs.
+decrypt() {
+  local text
+  if ((PRIMARY)); then
+    text=${CMATRIX_SAVER_TITLE:-"$(hostname) \\\\ idle"}
+  else
+    text="$(date '+%H:%M') \\\\ $(date '+%d %b' | tr '[:upper:]' '[:lower:]')"
+  fi
+  local glyphs='01#$%&@*+=<>/\|[]{}?!~^'
+  local rows cols len frame i reveal out esc=$'\e'
+  sleep 0.15 # let the fullscreen resize land before measuring
+  read -r rows cols < <(stty size)
+  len=${#text}
+  printf '\e[?25l\e[2J'
+  for ((frame = 0; frame <= len * 2 + 6; frame++)); do
+    reveal=$((frame / 2))
+    out=''
+    for ((i = 0; i < len; i++)); do
+      if ((i < reveal)); then
+        out+="${esc}[1;38;2;204;34;34m${text:i:1}"
+      elif [[ ${text:i:1} == ' ' ]]; then
+        out+=' '
+      else
+        out+="${esc}[0;38;2;68;68;68m${glyphs:RANDOM%${#glyphs}:1}"
+      fi
+    done
+    # $out goes in as data (%s): glyphs like % and \ would break a format
+    printf '\e[%d;%dH%s\e[0m' $((rows / 2)) $(((cols - len) / 2 + 1)) "$out"
+    sleep 0.03
+  done
+  sleep 0.6
+  printf '\e[2J'
+}
+
+case ${1:-} in
+battery) battery; exit ;;
+idle) idle; exit ;;
+esac
+
+fade_in &
+decrypt
+wait
+
+# Own tmux server (-L, one per monitor slot) with no config: no prefix, no
+# plugins, nothing for tmux-resurrect to save. exit-unattached tears it
+# down when kitty closes. window-style paints an explicit black bg, which
+# kitty never makes transparent — so the window ends up opaque even if
+# the fade above couldn't reach kitty.
+exec tmux -L "cmatrix-saver-${CMATRIX_SAVER_SLOT:-0}" -f /dev/null \
+  start-server \; \
+  set -s exit-unattached on \; \
+  set -s escape-time 0 \; \
+  set -g default-terminal xterm-256color \; \
+  set -as terminal-overrides ',xterm-256color:RGB' \; \
+  set -g prefix None \; \
+  set -g window-style 'bg=#000000' \; \
+  set -g status "$( ((PRIMARY)) && echo on || echo off)" \; \
+  set -g status-position bottom \; \
+  set -g status-interval 1 \; \
+  set -g status-style 'bg=#000000,fg=#444444' \; \
+  set -g status-left-length 40 \; \
+  set -g status-right-length 80 \; \
+  set -g status-left '#[fg=#000000,bg=#cc2222,bold] #h #[default] ' \; \
+  set -g status-right "#[fg=#666666]#($SELF idle)  #($SELF battery)  #[fg=#444444]%a %d %b  #[fg=#cc2222,bold]%H:%M:%S " \; \
+  set -g window-status-format '' \; \
+  set -g window-status-current-format '' \; \
+  new-session -s saver cmatrix

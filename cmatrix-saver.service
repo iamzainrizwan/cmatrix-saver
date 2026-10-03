@@ -1,0 +1,11 @@
+[Unit]
+Description=cmatrix screensaver after 5 min idle
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/cmatrix-saver
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
