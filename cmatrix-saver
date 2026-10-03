@@ -17,8 +17,15 @@
 # XWayland renders at 1x, so text is slightly soft on fractionally scaled
 # displays. CMATRIX_SAVER_SINGLE=1 restores the old single native window.
 #
+# Saver keys (space, 1-9, c, n, p, t, r, ?) are handled in the scene, which
+# stamps $RUN/key so the input they cause doesn't close the windows here;
+# esc/q stamp $RUN/quit, which does. Any other key or the mouse closes it.
+# Each launch picks one scene for every monitor: cmatrix, or pipes.sh when
+# it's installed (CMATRIX_SAVER_SCENES narrows the pool).
+#
 # Run via cmatrix-saver.service (systemd user unit, see README).
-# `cmatrix-saver now` shows it straight away (bind it to a shortcut) and
+# `cmatrix-saver now [away message]` shows it straight away (bind it to a
+# shortcut; the message replaces the hostname in the status bar) and
 # `cmatrix-saver test` counts down from 5 first; both show it once,
 # regardless of idle time, and exit when it closes.
 # GNOME's own blank/lock (Settings > Power > Screen Blank) must be set
@@ -26,6 +33,11 @@
 
 IDLE_SECS=${CMATRIX_SAVER_IDLE:-300}
 POLL=2
+# systemd's PATH has neither ~/.local/bin nor /usr/games (Debian's pipes)
+PATH=$HOME/.local/bin:$PATH:/usr/games
+RUN=${XDG_RUNTIME_DIR:-/tmp}/cmatrix-saver-$UID
+mkdir -p "$RUN"
+export CMATRIX_SAVER_RUN=$RUN
 # Prefer kitty's official installer location (~/.local/bin): systemd's PATH
 # doesn't include it, and distro packages (e.g. Ubuntu's 0.32) are too old
 # for --position, so every launch would fail instantly.
@@ -73,7 +85,23 @@ for x, y, _scale, _transform, primary, *_ in state[2]:
 EOF
 }
 
+# cmatrix, plus pipes if pipes.sh is installed (Debian/Ubuntu call it pipes)
+pick_scene() {
+  local s pool=()
+  for s in ${CMATRIX_SAVER_SCENES:-cmatrix pipes}; do
+    case $s in
+    cmatrix) command -v cmatrix >/dev/null && pool+=(cmatrix) ;;
+    pipes) command -v pipes.sh >/dev/null || command -v pipes >/dev/null && pool+=(pipes) ;;
+    esac
+  done
+  ((${#pool[@]})) || pool=(cmatrix)
+  echo "${pool[RANDOM % ${#pool[@]}]}"
+}
+
 launch() {
+  rm -f "$RUN/key" "$RUN/quit"
+  CMATRIX_SAVER_SCENE=$(pick_scene)
+  export CMATRIX_SAVER_SCENE
   local common=(--class cmatrix-saver --start-as fullscreen
     -o background=#000000 -o window_padding_width=0
     -o background_opacity=0 -o dynamic_background_opacity=yes
@@ -116,6 +144,16 @@ close_all() {
   pids=()
 }
 
+# 0 if the last input (idle ms ago) came from a saver key: stamped at most
+# 1.5s before it, which also covers the key's release landing a poll later.
+saver_key() {
+  [[ -e $RUN/key ]] || return 1
+  local now stamp
+  now=$(date +%s%3N)
+  stamp=$(date +%s%3N -r "$RUN/key")
+  ((stamp >= now - $1 - 1500))
+}
+
 # Saver windows from any instance (the idle service, or `now`/`test`), so
 # the two never stack a second set of windows on top of the first.
 running() {
@@ -124,9 +162,12 @@ running() {
 
 trap 'close_all; exit' INT TERM
 
-case $1 in
+MODE=${1:-}
+case $MODE in
 now)
   running && exit 0
+  shift
+  [[ -n $* ]] && export CMATRIX_SAVER_AWAY="$*"
   sleep 0.5 # let the shortcut's keys come up before the windows open
   launch
   ;;
@@ -156,10 +197,12 @@ while sleep "$POLL"; do
       pids=()
       dismissed=1
       echo "saver windows closed without input; waiting for activity" >&2
-    elif ((idle < prev)); then
+    elif [[ -e $RUN/quit ]]; then
+      close_all
+    elif ((idle < prev)) && ! saver_key "$idle"; then
       close_all
     fi
-    ((${#pids[@]} == 0)) && [[ $1 == now || $1 == test ]] && exit 0
+    ((${#pids[@]} == 0)) && [[ $MODE == now || $MODE == test ]] && exit 0
   elif ((!dismissed && idle >= IDLE_SECS * 1000)) && ! idle_inhibited && ! locked && ! running; then
     launch
   fi

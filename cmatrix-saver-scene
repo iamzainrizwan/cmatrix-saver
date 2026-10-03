@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # What runs inside each cmatrix-saver kitty window (one per monitor):
 # fades the window in from transparent (the desktop "dims" to black), plays
-# a short decrypt-style title, then runs cmatrix under a throwaway tmux
-# server. On the primary monitor ($CMATRIX_SAVER_PRIMARY=1) the title is
-# "<host> \\ idle" and a status bar shows host, now playing, idle time,
-# battery, date and clock; other monitors decrypt "HH:MM \\ dd mon" and get
-# no bar. On battery at or below CMATRIX_SAVER_LOW_BATTERY percent (20) it
-# skips all of that and just goes black, to save power.
+# a short decrypt-style title, then runs the scene ($CMATRIX_SAVER_SCENE:
+# cmatrix or pipes) under a throwaway tmux server. On the primary monitor
+# ($CMATRIX_SAVER_PRIMARY=1) the title is "<host> \\ idle" and a status bar
+# shows host (or the away message), now playing, idle time, battery, date
+# and clock; other monitors decrypt "HH:MM \\ dd mon" and get no bar. On
+# battery at or below CMATRIX_SAVER_LOW_BATTERY percent (20) it skips all
+# of that and just goes black, to save power.
+#
+# Keys are tmux bindings that call `cmatrix-saver-scene key <name>`. That
+# stamps $RUN/key first, so cmatrix-saver knows the input was a saver key
+# and doesn't close the windows; any other key or the mouse still does.
 #
 # `cmatrix-saver-scene battery|idle|nowplaying` are the status-bar segments;
 # tmux calls back into this script for them every second.
@@ -15,6 +20,8 @@ SELF=$(readlink -f "$0")
 KITTEN=${KITTEN:-kitten}
 PRIMARY=${CMATRIX_SAVER_PRIMARY:-1}
 LOW=${CMATRIX_SAVER_LOW_BATTERY:-20}
+RUN=${CMATRIX_SAVER_RUN:-${XDG_RUNTIME_DIR:-/tmp}/cmatrix-saver-$UID}
+PATH=$HOME/.local/bin:$PATH:/usr/games
 
 battery() {
   local b pct status colour='#666666' mark=''
@@ -40,36 +47,46 @@ low_battery() {
   return 1
 }
 
-# "♪ artist - title" from the first MPRIS player that's playing (Spotify,
-# browsers, mpv...); nothing when none is. ## keeps tmux from reading a #
-# in a title as a format.
-nowplaying() {
-  [[ ${CMATRIX_SAVER_NOWPLAYING:-1} == 1 ]] || return
-  python3 - 2>/dev/null <<'EOF'
-import gi
+# MPRIS over D-Bus (Spotify, browsers, mpv...). `mpris show` prints
+# "♪ artist - title" for the first player that's playing, nothing when none
+# is (## keeps tmux from reading a # in a title as a format). `mpris Next`
+# / `mpris PlayPause` call that method on the playing player, or failing
+# that a paused one.
+mpris() {
+  python3 - "$1" 2>/dev/null <<'EOF'
+import sys, gi
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib
+action = sys.argv[1]
 bus = Gio.bus_get_sync(Gio.BusType.SESSION)
 names = bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
     "org.freedesktop.DBus", "ListNames", None, None, 0, -1, None).unpack()[0]
+players = []
 for name in sorted(n for n in names if n.startswith("org.mpris.MediaPlayer2.")):
+    get = lambda prop: bus.call_sync(name, "/org/mpris/MediaPlayer2",
+        "org.freedesktop.DBus.Properties", "Get",
+        GLib.Variant("(ss)", ("org.mpris.MediaPlayer2.Player", prop)),
+        None, 0, 500, None).unpack()[0]
     try:
-        get = lambda prop: bus.call_sync(name, "/org/mpris/MediaPlayer2",
-            "org.freedesktop.DBus.Properties", "Get",
-            GLib.Variant("(ss)", ("org.mpris.MediaPlayer2.Player", prop)),
-            None, 0, 500, None).unpack()[0]
-        if get("PlaybackStatus") != "Playing":
-            continue
-        meta = get("Metadata")
+        players.append((name, get("PlaybackStatus"), get))
     except Exception:
-        continue
-    title = meta.get("xesam:title") or ""
-    artist = ", ".join(meta.get("xesam:artist") or [])
-    text = f"{artist} - {title}" if artist and title else title or artist
-    if text:
-        text = text if len(text) <= 48 else text[:47] + "…"
-        print("♪ " + text.replace("#", "##"))
-        break
+        pass
+playing = [p for p in players if p[1] == "Playing"]
+if action == "show":
+    for name, _, get in playing:
+        meta = get("Metadata")
+        title = meta.get("xesam:title") or ""
+        artist = ", ".join(meta.get("xesam:artist") or [])
+        text = f"{artist} - {title}" if artist and title else title or artist
+        if text:
+            text = text if len(text) <= 48 else text[:47] + "…"
+            print("♪ " + text.replace("#", "##"))
+            break
+else:
+    target = playing or [p for p in players if p[1] == "Paused"]
+    if target:
+        bus.call_sync(target[0][0], "/org/mpris/MediaPlayer2",
+            "org.mpris.MediaPlayer2.Player", action, None, None, 0, 1000, None)
 EOF
 }
 
@@ -128,10 +145,96 @@ decrypt() {
   printf '\e[2J'
 }
 
+# The tmux pane's process: runs the scene as a child (stdin from the tty,
+# or the keys tmux sends wouldn't reach it) so pause can SIGSTOP the child
+# alone, and a stopped child is woken before it's told to exit — otherwise
+# it would sit stopped forever after the window closes.
+rain() {
+  local cmd
+  case ${CMATRIX_SAVER_SCENE:-cmatrix} in
+  pipes) cmd=("$(command -v pipes.sh || command -v pipes)" -p 4 -R -r 4000) ;;
+  *) cmd=(cmatrix) ;;
+  esac
+  "${cmd[@]}" </dev/tty &
+  local child=$!
+  tmux set -g @child "$child" \; set -g @paused 0
+  trap 'kill -CONT $child 2>/dev/null; kill -TERM $child 2>/dev/null' HUP TERM EXIT
+  wait "$child"
+}
+
+# What each saver key does; runs from a tmux binding, so plain `tmux`
+# talks to this window's server.
+key() {
+  touch "$RUN/key"
+  local scene child cur want
+  scene=$(tmux show -gv @scene)
+  case $1 in
+  quit) touch "$RUN/quit" ;;
+  pause)
+    child=$(tmux show -gv @child)
+    if (($(tmux show -gv @paused))); then
+      kill -CONT "$child" && tmux set -g @paused 0
+    else
+      kill -STOP "$child" && tmux set -g @paused 1
+    fi
+    ;;
+  [1-9])
+    if [[ $scene == pipes ]]; then
+      # pipes steps its framerate by 1 per F/D key, 20-100 fps
+      cur=$(tmux show -gv @fps) want=$((20 + ($1 - 1) * 10))
+      ((want > cur)) && tmux send-keys -N $((want - cur)) F
+      ((want < cur)) && tmux send-keys -N $((cur - want)) D
+      tmux set -g @fps "$want"
+    else
+      tmux send-keys -l $((10 - $1)) # cmatrix: lower digit = shorter delay
+    fi
+    ;;
+  colour)
+    if [[ $scene == pipes ]]; then
+      tmux send-keys C # colour on/off
+    else
+      local keys='!@#$%^&' # cmatrix: red green yellow blue magenta cyan white
+      cur=$((($(tmux show -gv @colour) + 1) % 7))
+      tmux set -g @colour "$cur" \; send-keys -l "${keys:cur:1}"
+    fi
+    ;;
+  next) mpris Next ;;
+  playpause) mpris PlayPause ;;
+  status) tmux if -F '#{==:#{status},off}' 'set -g status on' 'set -g status off' ;;
+  replay) tmux respawn-pane -k "'$SELF' replay" ;;
+  help)
+    tmux display-popup -E -w 44 -h 15 -b single -S 'fg=#444444' \
+      -s 'bg=#000000,fg=#e0e0e0' "'$SELF' help"
+    ;;
+  esac
+}
+
+help() {
+  printf '\e[?25l\n'
+  printf '  \e[1;38;2;204;34;34m%-9s\e[0m %s\n' \
+    space 'pause / resume' \
+    1-9 'speed (9 fastest)' \
+    c 'colour' \
+    n 'next track' \
+    p 'play / pause music' \
+    t 'status bar on / off' \
+    r 'replay the title' \
+    '?' 'this list' \
+    'esc  q' 'close' \
+    mouse 'close'
+  printf '\n  \e[38;2;102;102;102many key closes this list\e[0m'
+  read -rsn1 -t 15
+  touch "$RUN/key" # the key that closed the list isn't a "close the saver"
+}
+
 case ${1:-} in
 battery) battery; exit ;;
 idle) idle; exit ;;
-nowplaying) nowplaying; exit ;;
+nowplaying) [[ ${CMATRIX_SAVER_NOWPLAYING:-1} == 1 ]] && mpris show; exit ;;
+key) key "$2"; exit ;;
+help) help; exit ;;
+rain) rain; exit ;;
+replay) decrypt; rain; exit ;;
 esac
 
 if low_battery; then
@@ -145,27 +248,48 @@ fade_in &
 decrypt
 wait
 
-# Own tmux server (-L, one per monitor slot) with no config: no prefix, no
-# plugins, nothing for tmux-resurrect to save. exit-unattached tears it
-# down when kitty closes. window-style paints an explicit black bg, which
-# kitty never makes transparent — so the window ends up opaque even if
-# the fade above couldn't reach kitty.
-exec tmux -L "cmatrix-saver-${CMATRIX_SAVER_SLOT:-0}" -f /dev/null \
+mkdir -p "$RUN"
+conf=$RUN/tmux-${CMATRIX_SAVER_SLOT:-0}.conf
+{
+  printf 'bind -n %s run-shell -b "%q key %s"\n' \
+    Space "$SELF" pause c "$SELF" colour n "$SELF" next p "$SELF" playpause \
+    t "$SELF" status r "$SELF" replay '?' "$SELF" help \
+    q "$SELF" quit Escape "$SELF" quit
+  for d in 1 2 3 4 5 6 7 8 9; do
+    printf 'bind -n %s run-shell -b "%q key %s"\n' "$d" "$SELF" "$d"
+  done
+} >"$conf"
+
+# host block on the left, or the away message (`cmatrix-saver now "brb"`)
+left=${CMATRIX_SAVER_AWAY:-'#h'}
+[[ -n ${CMATRIX_SAVER_AWAY:-} ]] && left=${left//#/##} && left=${left:0:40}
+
+# Own tmux server (-L, one per monitor slot) with only the key bindings
+# above: no prefix, no plugins, nothing for tmux-resurrect to save.
+# exit-unattached tears it down when kitty closes. window-style paints an
+# explicit black bg, which kitty never makes transparent — so the window
+# ends up opaque even if the fade above couldn't reach kitty.
+exec tmux -L "cmatrix-saver-${CMATRIX_SAVER_SLOT:-0}" -f "$conf" \
   start-server \; \
   set -s exit-unattached on \; \
   set -s escape-time 0 \; \
   set -g default-terminal xterm-256color \; \
   set -as terminal-overrides ',xterm-256color:RGB' \; \
   set -g prefix None \; \
+  set -g @scene "${CMATRIX_SAVER_SCENE:-cmatrix}" \; \
+  set -g @fps 75 \; \
+  set -g @colour 1 \; \
+  set -g @paused 0 \; \
   set -g window-style 'bg=#000000' \; \
+  set -g popup-style 'bg=#000000' \; \
   set -g status "$( ((PRIMARY)) && echo on || echo off)" \; \
   set -g status-position bottom \; \
   set -g status-interval 1 \; \
   set -g status-style 'bg=#000000,fg=#444444' \; \
-  set -g status-left-length 40 \; \
+  set -g status-left-length 60 \; \
   set -g status-right-length 140 \; \
-  set -g status-left '#[fg=#000000,bg=#cc2222,bold] #h #[default] ' \; \
+  set -g status-left "#[fg=#000000,bg=#cc2222,bold] $left #[default] " \; \
   set -g status-right "#[fg=#cc2222]#($SELF nowplaying)  #[fg=#666666]#($SELF idle)  #($SELF battery)  #[fg=#444444]%a %d %b  #[fg=#cc2222,bold]%H:%M:%S " \; \
   set -g window-status-format '' \; \
   set -g window-status-current-format '' \; \
-  new-session -s saver cmatrix
+  new-session -s saver "'$SELF' rain"
