@@ -8,12 +8,12 @@ import os, random, select, signal, sys, termios, tty
 from collections import deque
 
 SPEEDS = [0.20, 0.15, 0.11, 0.085, 0.065, 0.05, 0.038, 0.028, 0.018]
-# head, body, then the tail fading out
+# head, body, then the tail fading out; and the % it eats
 SCHEMES = [
     ["#ff4444", "#cc2222", "#882222", "#551515", "#331010"],
     ["#e0e0e0", "#666666", "#444444", "#333333", "#222222"],
 ]
-FOOD = "#e0e0e0"
+FOOD = ["#e0e0e0", "#cc2222"]
 GROW = 3
 MAX_FILL = 0.3  # stops growing past this share of the screen
 DIRS = [(1, 0), (0, 1), (-1, 0), (0, -1)]
@@ -32,12 +32,21 @@ class Snake:
         self.resized = False
         self.reset_grid()
 
-    # each cell is two columns wide, so it moves as fast across as down
+    # each cell is two columns wide, so it moves as fast across as down.
+    # A resize that changes the height is almost always the notices strip
+    # appearing or going above this pane, which moves the pane's top edge:
+    # shift everything by the difference so the snake stays put on screen.
     def reset_grid(self):
         cols, rows = os.get_terminal_size()
+        old_h = getattr(self, "h", None)
         self.w, self.h = max(cols // 2, 4), max(rows, 4)
         out.write("\033[2J")
         body = getattr(self, "body", None)
+        if body and old_h:
+            dy = self.h - old_h
+            self.body = deque((x, y + dy) for x, y in body)
+            self.food = {(x, y + dy) for x, y in self.food}
+            body = self.body
         if body and all(self.inside(p) for p in body):
             self.food = {p for p in self.food if self.inside(p)}
             self.redraw()
@@ -48,7 +57,7 @@ class Snake:
         return 0 <= p[0] < self.w and 0 <= p[1] < self.h
 
     def spawn(self):
-        x, y = random.randrange(2, self.w - 2), random.randrange(self.h)
+        x, y = random.randrange(2, max(self.w - 2, 3)), random.randrange(self.h)
         self.body = deque([(x, y), (x - 1, y), (x - 2, y)])
         self.dir = (1, 0)
         self.grow = GROW
@@ -70,7 +79,7 @@ class Snake:
         out.write("\033[%d;%dH%s" % (p[1] + 1, p[0] * 2 + 1, text))
 
     def draw_food(self, p):
-        self.put(p, "\033[1m" + rgb(FOOD) + "% \033[0m")
+        self.put(p, "\033[1m" + rgb(FOOD[self.scheme]) + "% \033[0m")
 
     def colour_of(self, i):
         c = SCHEMES[self.scheme]
@@ -125,6 +134,7 @@ class Snake:
 
     def path_to_food(self, blocked):
         head = self.body[0]
+        self.food.discard(head)  # never start the search standing on one
         prev = {head: None}
         todo = deque([head])
         while todo:
@@ -161,11 +171,11 @@ class Snake:
             self.dissolve()
             return
         self.dir = (nxt[0] - self.body[0][0], nxt[1] - self.body[0][1])
-        if nxt in self.food:
+        ate = nxt in self.food
+        if ate:
             self.food.discard(nxt)
             if len(self.body) < self.w * self.h * MAX_FILL:
                 self.grow += GROW
-            self.top_up_food()
         if self.grow:
             self.grow -= 1
         else:
@@ -173,6 +183,9 @@ class Snake:
             if gone != nxt:
                 self.put(gone, "  ")
         self.body.appendleft(nxt)
+        if ate:
+            # only now the head is in place: before, a new % could land on it
+            self.top_up_food()
         # head, neck, and the fading tail are the only cells that change
         for i in {0, 1, *range(max(len(self.body) - 4, 0), len(self.body))}:
             if i < len(self.body):
