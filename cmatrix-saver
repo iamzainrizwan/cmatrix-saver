@@ -126,6 +126,7 @@ launch() {
   fi
   # the scene gives the primary monitor the host title + status bar; the
   # others decrypt the time/date instead and run bare cmatrix
+  local placements=()
   for m in "${mons[@]}"; do
     read -r x y primary <<<"$m"
     CMATRIX_SAVER_SLOT=$n CMATRIX_SAVER_PRIMARY=$primary \
@@ -133,8 +134,55 @@ launch() {
       --position "$((x + 50))x$((y + 50))" "${common[@]}" \
       --listen-on "unix:@cmatrix-saver-$$-$n" "$SCENE" &
     pids+=($!)
+    placements+=("$! $x $y")
     ((n++)) # not inside the & command: that runs in a subshell
   done
+  place "${placements[@]}" &
+}
+
+# Mutter can ignore --position too (seen on GNOME 46 with a fractionally
+# scaled monitor: every window landed on the same monitor, the primary's on
+# top), so once each kitty's window is up, ask for it to be fullscreened on
+# its monitor explicitly (_NET_WM_FULLSCREEN_MONITORS). Args: "pid x y"...
+place() {
+  python3 - "$@" 2>/dev/null <<'EOF'
+import os, re, subprocess, sys, time
+import gi
+gi.require_version("Gdk", "3.0")
+gi.require_version("GdkX11", "3.0")
+from gi.repository import Gdk, GdkX11
+
+Gdk.set_allowed_backends("x11")
+disp = Gdk.Display.open(os.environ["DISPLAY"])
+mons = {}
+for i in range(disp.get_n_monitors()):
+    g = disp.get_monitor(i).get_geometry()
+    mons[g.x, g.y] = i
+want = {}
+for arg in sys.argv[1:]:
+    pid, x, y = map(int, arg.split())
+    if (x, y) in mons:
+        want[pid] = mons[x, y]
+
+def out(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout
+
+deadline = time.monotonic() + 10
+while want and time.monotonic() < deadline:
+    time.sleep(0.25)
+    tree = out("xwininfo", "-root", "-tree")
+    for xid in re.findall(r'^\s*(0x[0-9a-f]+) .*\("cmatrix-saver"', tree, re.M):
+        props = out("xprop", "-id", xid, "_NET_WM_PID", "_NET_WM_STATE")
+        m = re.search(r"_NET_WM_PID\(CARDINAL\) = (\d+)", props)
+        # mapped and managed: Mutter has applied --start-as fullscreen
+        if not m or "_NET_WM_STATE_FULLSCREEN" not in props:
+            continue
+        mon = want.pop(int(m.group(1)), None)
+        if mon is not None:
+            win = GdkX11.X11Window.foreign_new_for_display(disp, int(xid, 16))
+            win.fullscreen_on_monitor(mon)
+            disp.flush()
+EOF
 }
 
 alive() {
