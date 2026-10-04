@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+# cmatrix-saver notice source for Claude Code: sessions that finished a turn
+# or are waiting on you (a permission prompt or a question).
+#
+#   claude hook        Claude Code hook: reads the hook's JSON on stdin and
+#                      appends to $RUN/claude.log. Wire it to Stop,
+#                      UserPromptSubmit and Notification
+#                      (permission_prompt|elicitation_dialog).
+#   claude list SINCE  each session's latest event since SINCE (epoch ms),
+#                      as notice lines: <ms> <urgent|info> <title> <detail>
+#
+# UserPromptSubmit logs "busy", which hides the session again: you've
+# answered it, from wherever.
+import json, os, sys, time
+
+RUN = os.environ.get("CMATRIX_SAVER_RUN") or "%s/cmatrix-saver-%d" % (
+    os.environ.get("XDG_RUNTIME_DIR", "/tmp"), os.getuid())
+LOG = f"{RUN}/claude.log"
+
+
+def clean(s):
+    return " ".join(str(s).split())
+
+
+def hook():
+    d = json.load(sys.stdin)
+    event = d.get("hook_event_name")
+    kind = {"Stop": "done", "UserPromptSubmit": "busy"}.get(event)
+    if event == "Notification" and d.get("notification_type", "permission_prompt") in (
+            "permission_prompt", "elicitation_dialog"):
+        kind = "input"
+    if not kind:
+        return
+    # the repo, not the worktree a session isolated itself into
+    cwd = (d.get("cwd") or "").split("/.claude/worktrees/")[0]
+    msg = (d.get("message") or "") if kind == "input" else ""
+    os.makedirs(RUN, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write("\t".join([str(int(time.time() * 1000)), kind, clean(d.get("session_id", "")),
+                           clean(os.path.basename(cwd) or "?"), clean(msg)]) + "\n")
+    # keep it short: the saver only ever needs the last few hours
+    with open(LOG) as f:
+        lines = f.readlines()
+    if len(lines) > 500:
+        with open(LOG + ".tmp", "w") as f:
+            f.writelines(lines[-200:])
+        os.replace(LOG + ".tmp", LOG)
+
+
+def list_(since):
+    try:
+        lines = open(LOG).read().splitlines()
+    except OSError:
+        return
+    latest = {}
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) == 5 and parts[0].isdigit() and int(parts[0]) >= since:
+            latest[parts[2] or parts[3]] = parts
+    for ts, kind, _, project, msg in latest.values():
+        if kind == "input":
+            print(ts, "urgent", project, msg.removeprefix("Claude ") or "needs input", sep="\t")
+        elif kind == "done":
+            print(ts, "info", project, "done", sep="\t")
+
+
+try:
+    if sys.argv[1:2] == ["hook"]:
+        hook()
+    elif sys.argv[1:2] == ["list"]:
+        list_(int(sys.argv[2]))
+except Exception:
+    pass  # never break a Claude session or the saver over this

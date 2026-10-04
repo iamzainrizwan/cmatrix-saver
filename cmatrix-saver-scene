@@ -2,7 +2,8 @@
 # What runs inside each cmatrix-saver kitty window (one per monitor):
 # fades the window in from transparent (the desktop "dims" to black), plays
 # a short decrypt-style title, then runs the scene ($CMATRIX_SAVER_SCENE:
-# cmatrix or pipes) under a throwaway tmux server. On the primary monitor
+# cmatrix, pipes or one from scenes/; `s` cycles through them) under a
+# throwaway tmux server. On the primary monitor
 # ($CMATRIX_SAVER_PRIMARY=1) the title is "<host> \\ idle" and a status bar
 # shows host (or the away message), now playing, idle time, battery, date
 # and clock; other monitors decrypt "HH:MM \\ dd mon" and get no bar. On
@@ -14,7 +15,9 @@
 # and doesn't close the windows; any other key or the mouse still does.
 #
 # `cmatrix-saver-scene battery|idle|nowplaying` are the status-bar segments;
-# tmux calls back into this script for them every second.
+# tmux calls back into this script for them every second. On the primary
+# monitor a pane along the top lists notices from sources/ (Claude Code
+# sessions that finished or need input) since you went idle; see notices().
 
 SELF=$(readlink -f "$0")
 KITTEN=${KITTEN:-kitten}
@@ -90,6 +93,121 @@ else:
 EOF
 }
 
+# Scenes, in the order `s` cycles through them: cmatrix, pipes (if pipes.sh
+# is installed; Debian/Ubuntu call it pipes), then executables in scenes/
+# next to this script and ~/.config/cmatrix-saver/scenes/ (same name
+# overrides a built-in). A scene just draws to its terminal until it's
+# killed; the saver sends it 1-9 (speed) and c (colour) as plain keys.
+# CMATRIX_SAVER_SCENES narrows the set.
+scene_files() {
+  local d f
+  for d in "$(dirname "$SELF")/scenes" "${XDG_CONFIG_HOME:-$HOME/.config}/cmatrix-saver/scenes"; do
+    for f in "$d"/*; do
+      [[ -f $f && -x $f ]] && echo "$f"
+    done
+  done
+}
+
+scenes() {
+  local name
+  declare -A found=()
+  command -v cmatrix >/dev/null && found[cmatrix]=1
+  command -v pipes.sh >/dev/null || command -v pipes >/dev/null && found[pipes]=1
+  while read -r f; do found[${f##*/}]=1; done < <(scene_files)
+  for name in ${CMATRIX_SAVER_SCENES:-cmatrix pipes $(scene_files | sed 's|.*/||' | sort -u)}; do
+    [[ -n ${found[$name]:-} ]] && echo "$name"
+  done | awk '!seen[$0]++'
+}
+
+# Notice sources: executables in sources/ next to this script, then
+# ~/.config/cmatrix-saver/sources/ (same name overrides a built-in). Each
+# answers `list SINCE` (epoch ms) with lines
+#   <epoch ms> TAB <urgent|info> TAB <title> TAB <detail>
+# and may answer `watch` with a long-running collector, which cmatrix-saver
+# keeps running in the background. CMATRIX_SAVER_SOURCES narrows the set.
+sources() {
+  local d f name
+  declare -A found=()
+  for d in "$(dirname "$SELF")/sources" "${XDG_CONFIG_HOME:-$HOME/.config}/cmatrix-saver/sources"; do
+    for f in "$d"/*; do
+      [[ -f $f && -x $f ]] && found[${f##*/}]=$f
+    done
+  done
+  for name in ${CMATRIX_SAVER_SOURCES:-${!found[*]}}; do
+    [[ -n ${found[$name]:-} ]] && echo "${found[$name]}"
+  done
+}
+
+# The top pane on the primary monitor: everything the sources report since
+# the saver came up ($RUN/since, written at launch), urgent first, then newest
+# first, one per row (CMATRIX_SAVER_NOTICES rows at most, 5). With nothing
+# to show, the scene pane stays zoomed over it so it takes no space.
+notices() {
+  local srcs rain since rows cols out n shown=-1
+  mapfile -t srcs < <(sources)
+  rain=$(tmux list-panes -F '#{pane_id}' | grep -vx "$TMUX_PANE")
+  printf '\e[?25l'
+  while :; do
+    since=$(cat "$RUN/since" 2>/dev/null) || since=$(date +%s%3N)
+    read -r rows cols < <(stty size)
+    out=$(for s in "${srcs[@]}"; do
+      "$s" list "$since" 2>/dev/null | sed "s|^|${s##*/}\t|"
+    done | render_notices "$cols" "${CMATRIX_SAVER_NOTICES:-5}")
+    n=0
+    [[ -n $out ]] && n=$(wc -l <<<"$out")
+    if ((n != shown)); then
+      if ((n == 0)); then
+        tmux if -F '#{window_zoomed_flag}' '' "resize-pane -Z -t $rain"
+      else
+        tmux if -F '#{window_zoomed_flag}' "resize-pane -Z -t $rain" '' \; \
+          resize-pane -t "$TMUX_PANE" -y "$n"
+      fi
+      shown=$n
+    fi
+    printf '\e[H%s\e[J' "$out"
+    sleep 2
+  done
+}
+
+# source TAB ms TAB level TAB title TAB detail lines on stdin -> rows of at
+# most $1 columns, $2 rows (the last one "+N more" if they don't all fit)
+render_notices() {
+  python3 -c '
+import sys, time
+cols, maxrows = int(sys.argv[1]), int(sys.argv[2])
+items = [l.rstrip("\n").split("\t") for l in sys.stdin]
+items = [i for i in items if len(i) == 5 and i[1].isdigit()]
+items.sort(key=lambda i: (i[2] != "urgent", -int(i[1])))
+if len(items) > maxrows:
+    items, more = items[:maxrows - 1], len(items) - maxrows + 1
+else:
+    more = 0
+now = time.time() * 1000
+def ago(ms):
+    m = int((now - int(ms)) // 60000)
+    return "now" if m < 1 else f"{m}m" if m < 60 else f"{m // 60}h{m % 60:02d}"
+lw = max([len(i[0]) for i in items] + [0])
+tw = max([len(i[3]) for i in items] + [0])
+red, grey, white, dim, off = ("\033[" + c for c in (
+    "1;38;2;0;0;0;48;2;204;34;34m", "38;2;102;102;102m", "1;38;2;224;224;224m",
+    "38;2;68;68;68m", "0m"))
+rows = []
+for src, ms, level, title, detail in items:
+    label = f" {src:<{lw}} "
+    label = (red if level == "urgent" else "\033[38;2;204;34;34m") + label + off
+    a = ago(ms)
+    room = cols - 2 - (lw + 2) - 2 - tw - 2 - len(a) - 3
+    if room < 1:
+        detail = ""
+    elif len(detail) > room:
+        detail = detail[:room - 1] + "…"
+    rows.append(f"  {label}  {white}{title:<{tw}}{off}  {grey}{detail}{off}{dim} · {a}{off}\033[K")
+if more:
+    rows.append(f"  {dim}+{more} more{off}\033[K")
+print("\n".join(rows), end="")
+' "$@"
+}
+
 idle() {
   local ms
   ms=$(gdbus call --session --dest org.gnome.Mutter.IdleMonitor \
@@ -150,60 +268,98 @@ decrypt() {
 # alone, and a stopped child is woken before it's told to exit — otherwise
 # it would sit stopped forever after the window closes.
 rain() {
-  local cmd
-  case ${CMATRIX_SAVER_SCENE:-cmatrix} in
+  local cmd scene
+  scene=$(tmux show -gv @scene 2>/dev/null)
+  case ${scene:-${CMATRIX_SAVER_SCENE:-cmatrix}} in
+  cmatrix) cmd=(cmatrix) ;;
   pipes) cmd=("$(command -v pipes.sh || command -v pipes)" -p 4 -R -r 4000) ;;
-  *) cmd=(cmatrix) ;;
+  *) cmd=("$(scene_files | grep "/$scene\$" | tail -1)") ;;
   esac
   "${cmd[@]}" </dev/tty &
   local child=$!
-  tmux set -g @child "$child" \; set -g @paused 0
+  # @rain: the scene pane, which keys from any window's server target
+  tmux set -g @child "$child" \; set -g @paused 0 \; set -g @rain "$TMUX_PANE"
   trap 'kill -CONT $child 2>/dev/null; kill -TERM $child 2>/dev/null' HUP TERM EXIT
   wait "$child"
 }
 
-# What each saver key does; runs from a tmux binding, so plain `tmux`
-# talks to this window's server.
+# Every saver window's tmux server (one per monitor), focused one included.
+servers() {
+  local sock
+  for sock in "${TMUX_TMPDIR:-/tmp}/tmux-$UID"/cmatrix-saver-*; do
+    [[ -S $sock ]] && tmux -L "${sock##*/}" has-session 2>/dev/null && echo "${sock##*/}"
+  done
+}
+
+# What each saver key does; runs from a tmux binding, so plain `tmux` talks
+# to the focused window's server. Only that window gets the keys, and you
+# can't focus another monitor's without closing the saver, so the keys that
+# change the scene (pause, speed, colour, next scene, replay) work out what
+# to do from the focused window and then do it in every window via `t`.
 key() {
   touch "$RUN/key"
-  local scene child cur want
+  local scene srv srvs cur want
+  t() { tmux -L "$srv" "$@"; }
   scene=$(tmux show -gv @scene)
+  mapfile -t srvs < <(servers)
   case $1 in
   quit) touch "$RUN/quit" ;;
   pause)
-    child=$(tmux show -gv @child)
-    if (($(tmux show -gv @paused))); then
-      kill -CONT "$child" && tmux set -g @paused 0
-    else
-      kill -STOP "$child" && tmux set -g @paused 1
-    fi
+    local sig=STOP paused=1
+    (($(tmux show -gv @paused))) && sig=CONT paused=0
+    for srv in "${srvs[@]}"; do
+      kill -"$sig" "$(t show -gv @child)" && t set -g @paused "$paused"
+    done
     ;;
   [1-9])
-    if [[ $scene == pipes ]]; then
-      # pipes steps its framerate by 1 per F/D key, 20-100 fps
-      cur=$(tmux show -gv @fps) want=$((20 + ($1 - 1) * 10))
-      ((want > cur)) && tmux send-keys -N $((want - cur)) F
-      ((want < cur)) && tmux send-keys -N $((cur - want)) D
-      tmux set -g @fps "$want"
-    else
-      tmux send-keys -l $((10 - $1)) # cmatrix: lower digit = shorter delay
-    fi
+    for srv in "${srvs[@]}"; do
+      if [[ $scene == pipes ]]; then
+        # pipes steps its framerate by 1 per F/D key, 20-100 fps
+        cur=$(t show -gv @fps) want=$((20 + ($1 - 1) * 10))
+        ((want > cur)) && t send-keys -t "$(t show -gv @rain)" -N $((want - cur)) F
+        ((want < cur)) && t send-keys -t "$(t show -gv @rain)" -N $((cur - want)) D
+        t set -g @fps "$want"
+      elif [[ $scene == cmatrix ]]; then
+        # lower digit = shorter delay
+        t send-keys -t "$(t show -gv @rain)" -l $((10 - $1))
+      else
+        t send-keys -t "$(t show -gv @rain)" -l "$1"
+      fi
+    done
     ;;
   colour)
-    if [[ $scene == pipes ]]; then
-      tmux send-keys C # colour on/off
-    else
-      local keys='!@#$%^&' # cmatrix: red green yellow blue magenta cyan white
-      cur=$((($(tmux show -gv @colour) + 1) % 7))
-      tmux set -g @colour "$cur" \; send-keys -l "${keys:cur:1}"
-    fi
+    local keys='!@#$%^&' # cmatrix: red green yellow blue magenta cyan white
+    cur=$((($(tmux show -gv @colour) + 1) % 7))
+    for srv in "${srvs[@]}"; do
+      case $scene in
+      pipes) t send-keys -t "$(t show -gv @rain)" C ;; # colour on/off
+      cmatrix) t set -g @colour "$cur" \; send-keys -t "$(t show -gv @rain)" -l "${keys:cur:1}" ;;
+      *) t send-keys -t "$(t show -gv @rain)" -l c ;;
+      esac
+    done
+    ;;
+  scene)
+    # the next one round, starting from its defaults
+    local all i
+    mapfile -t all < <(scenes)
+    for ((i = 0; i < ${#all[@]}; i++)); do
+      [[ ${all[i]} == "$scene" ]] && break
+    done
+    for srv in "${srvs[@]}"; do
+      t set -g @scene "${all[(i + 1) % ${#all[@]}]}" \; set -g @fps 75 \; \
+        set -g @colour 1 \; respawn-pane -k -t "$(t show -gv @rain)" "'$SELF' rain"
+    done
+    ;;
+  replay)
+    for srv in "${srvs[@]}"; do
+      t respawn-pane -k -t "$(t show -gv @rain)" "'$SELF' replay"
+    done
     ;;
   next) mpris Next ;;
   playpause) mpris PlayPause ;;
   status) tmux if -F '#{==:#{status},off}' 'set -g status on' 'set -g status off' ;;
-  replay) tmux respawn-pane -k "'$SELF' replay" ;;
   help)
-    tmux display-popup -E -w 44 -h 15 -b single -S 'fg=#444444' \
+    tmux display-popup -E -w 44 -h 16 -b single -S 'fg=#444444' \
       -s 'bg=#000000,fg=#e0e0e0' "'$SELF' help"
     ;;
   esac
@@ -215,6 +371,7 @@ help() {
     space 'pause / resume' \
     1-9 'speed (9 fastest)' \
     c 'colour' \
+    s 'next scene' \
     n 'next track' \
     p 'play / pause music' \
     t 'status bar on / off' \
@@ -230,6 +387,9 @@ help() {
 case ${1:-} in
 battery) battery; exit ;;
 idle) idle; exit ;;
+sources) sources; exit ;;
+scenes) scenes; exit ;;
+notices) notices; exit ;;
 nowplaying) [[ ${CMATRIX_SAVER_NOWPLAYING:-1} == 1 ]] && mpris show; exit ;;
 key) key "$2"; exit ;;
 help) help; exit ;;
@@ -252,7 +412,7 @@ mkdir -p "$RUN"
 conf=$RUN/tmux-${CMATRIX_SAVER_SLOT:-0}.conf
 {
   printf 'bind -n %s run-shell -b "%q key %s"\n' \
-    Space "$SELF" pause c "$SELF" colour n "$SELF" next p "$SELF" playpause \
+    Space "$SELF" pause c "$SELF" colour s "$SELF" scene n "$SELF" next p "$SELF" playpause \
     t "$SELF" status r "$SELF" replay '?' "$SELF" help \
     q "$SELF" quit Escape "$SELF" quit
   for d in 1 2 3 4 5 6 7 8 9; do
@@ -263,6 +423,12 @@ conf=$RUN/tmux-${CMATRIX_SAVER_SLOT:-0}.conf
 # host block on the left, or the away message (`cmatrix-saver now "brb"`)
 left=${CMATRIX_SAVER_AWAY:-'#h'}
 [[ -n ${CMATRIX_SAVER_AWAY:-} ]] && left=${left//#/##} && left=${left:0:40}
+
+# notices pane above the scene, made zoomed-away until there's something in
+# it; -d keeps the scene pane active, so the keys' send-keys still reach it
+top=()
+((PRIMARY)) && [[ -n $(sources) ]] &&
+  top=(';' split-window -d -b -v -l 1 "'$SELF' notices" ';' resize-pane -Z)
 
 # Own tmux server (-L, one per monitor slot) with only the key bindings
 # above: no prefix, no plugins, nothing for tmux-resurrect to save.
@@ -292,4 +458,8 @@ exec tmux -L "cmatrix-saver-${CMATRIX_SAVER_SLOT:-0}" -f "$conf" \
   set -g status-right "#[fg=#cc2222]#($SELF nowplaying)  #[fg=#666666]#($SELF idle)  #($SELF battery)  #[fg=#444444]%a %d %b  #[fg=#cc2222,bold]%H:%M:%S " \; \
   set -g window-status-format '' \; \
   set -g window-status-current-format '' \; \
-  new-session -s saver "'$SELF' rain"
+  set -g pane-border-lines simple \; \
+  set -g pane-border-indicators off \; \
+  set -g pane-border-style 'fg=#000000,bg=#000000' \; \
+  set -g pane-active-border-style 'fg=#000000,bg=#000000' \; \
+  new-session -s saver "'$SELF' rain" "${top[@]}"

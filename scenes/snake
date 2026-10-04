@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+# cmatrix-saver scene: a snake that steers itself around the screen eating
+# %s. It heads for the nearest one, but only along a path that still leaves
+# it a way back to its own tail; if there's none it wanders wherever has the
+# most room. When it finally boxes itself in, it dissolves and a new one
+# starts. Keys (sent by the saver): 1-9 speed (9 fastest), c colour.
+import os, random, select, signal, sys, termios, tty
+from collections import deque
+
+SPEEDS = [0.20, 0.15, 0.11, 0.085, 0.065, 0.05, 0.038, 0.028, 0.018]
+# head, body, then the tail fading out
+SCHEMES = [
+    ["#ff4444", "#cc2222", "#882222", "#551515", "#331010"],
+    ["#e0e0e0", "#666666", "#444444", "#333333", "#222222"],
+]
+FOOD = "#e0e0e0"
+GROW = 3
+MAX_FILL = 0.3  # stops growing past this share of the screen
+DIRS = [(1, 0), (0, 1), (-1, 0), (0, -1)]
+
+out = sys.stdout
+
+
+def rgb(hexcol):
+    return "\033[38;2;%d;%d;%dm" % tuple(int(hexcol[i:i + 2], 16) for i in (1, 3, 5))
+
+
+class Snake:
+    def __init__(self):
+        self.delay = SPEEDS[5]
+        self.scheme = 0
+        self.resized = False
+        self.reset_grid()
+
+    # each cell is two columns wide, so it moves as fast across as down
+    def reset_grid(self):
+        cols, rows = os.get_terminal_size()
+        self.w, self.h = max(cols // 2, 4), max(rows, 4)
+        out.write("\033[2J")
+        body = getattr(self, "body", None)
+        if body and all(self.inside(p) for p in body):
+            self.food = {p for p in self.food if self.inside(p)}
+            self.redraw()
+        else:
+            self.spawn()
+
+    def inside(self, p):
+        return 0 <= p[0] < self.w and 0 <= p[1] < self.h
+
+    def spawn(self):
+        x, y = random.randrange(2, self.w - 2), random.randrange(self.h)
+        self.body = deque([(x, y), (x - 1, y), (x - 2, y)])
+        self.dir = (1, 0)
+        self.grow = GROW
+        self.food = set()
+        out.write("\033[2J")
+        self.top_up_food()
+        self.redraw()
+
+    def top_up_food(self):
+        want = max(4, self.w * self.h // 250)
+        taken = set(self.body)
+        while len(self.food) < want and len(taken) + len(self.food) < self.w * self.h:
+            p = (random.randrange(self.w), random.randrange(self.h))
+            if p not in taken and p not in self.food:
+                self.food.add(p)
+                self.draw_food(p)
+
+    def put(self, p, text):
+        out.write("\033[%d;%dH%s" % (p[1] + 1, p[0] * 2 + 1, text))
+
+    def draw_food(self, p):
+        self.put(p, "\033[1m" + rgb(FOOD) + "% \033[0m")
+
+    def colour_of(self, i):
+        c = SCHEMES[self.scheme]
+        n = len(self.body)
+        if i == 0:
+            return c[0]
+        back = n - 1 - i  # 0 = the very tail
+        return c[4 - back] if back < 3 and n > 6 else c[1]
+
+    def draw_seg(self, i):
+        self.put(self.body[i], rgb(self.colour_of(i)) + "██\033[0m")
+
+    def redraw(self):
+        for p in self.food:
+            self.draw_food(p)
+        for i in range(len(self.body)):
+            self.draw_seg(i)
+
+    def neighbours(self, p, first=None):
+        dirs = DIRS[:]
+        random.shuffle(dirs)
+        if first in dirs:  # prefer carrying straight on: long clean lines
+            dirs.remove(first)
+            dirs.insert(0, first)
+        for dx, dy in dirs:
+            q = (p[0] + dx, p[1] + dy)
+            if self.inside(q):
+                yield q, (dx, dy)
+
+    def reachable(self, start, blocked, goal=None, cap=None):
+        """Flood fill from start; True if goal is reached, else the area."""
+        seen, todo = {start}, [start]
+        while todo:
+            p = todo.pop()
+            for q, _ in self.neighbours(p):
+                if q == goal:
+                    return True
+                if q not in seen and q not in blocked:
+                    seen.add(q)
+                    todo.append(q)
+                    if cap and len(seen) >= cap:
+                        return len(seen)
+        return False if goal else len(seen)
+
+    def safe_after(self, step):
+        """Would the snake still be able to reach its tail after this step?"""
+        body = list(self.body)
+        eats = step in self.food
+        new = [step] + (body if eats or self.grow else body[:-1])
+        tail = new[-1]
+        return self.reachable(step, set(new[1:-1]), goal=tail) is True
+
+    def path_to_food(self, blocked):
+        head = self.body[0]
+        prev = {head: None}
+        todo = deque([head])
+        while todo:
+            p = todo.popleft()
+            if p in self.food:
+                while prev[p] != head:
+                    p = prev[p]
+                return p
+            for q, _ in self.neighbours(p, self.dir):
+                if q not in prev and q not in blocked:
+                    prev[q] = p
+                    todo.append(q)
+        return None
+
+    def choose(self):
+        head = self.body[0]
+        # the tail moves out of the way this step, unless we're growing
+        blocked = set(list(self.body)[:-1] if not self.grow else self.body)
+        step = self.path_to_food(blocked)
+        if step and self.safe_after(step):
+            return step
+        best, best_key = None, None
+        for q, _ in self.neighbours(head, self.dir):
+            if q in blocked:
+                continue
+            key = (self.safe_after(q), self.reachable(q, blocked, cap=len(self.body) * 2))
+            if best_key is None or key > best_key:
+                best, best_key = q, key
+        return best
+
+    def step(self):
+        nxt = self.choose()
+        if nxt is None:
+            self.dissolve()
+            return
+        self.dir = (nxt[0] - self.body[0][0], nxt[1] - self.body[0][1])
+        if nxt in self.food:
+            self.food.discard(nxt)
+            if len(self.body) < self.w * self.h * MAX_FILL:
+                self.grow += GROW
+            self.top_up_food()
+        if self.grow:
+            self.grow -= 1
+        else:
+            gone = self.body.pop()
+            if gone != nxt:
+                self.put(gone, "  ")
+        self.body.appendleft(nxt)
+        # head, neck, and the fading tail are the only cells that change
+        for i in {0, 1, *range(max(len(self.body) - 4, 0), len(self.body))}:
+            if i < len(self.body):
+                self.draw_seg(i)
+
+    def dissolve(self):
+        dim = SCHEMES[self.scheme][3]
+        for p in self.body:
+            self.put(p, rgb(dim) + "░░\033[0m")
+        out.flush()
+        self.sleep(0.6)
+        while self.body:
+            for _ in range(max(1, len(self.body) // 25)):
+                if self.body:
+                    self.put(self.body.pop(), "  ")
+            out.flush()
+            self.sleep(0.02)
+        self.sleep(0.8)
+        self.spawn()
+
+    def key(self, ch):
+        if ch in "123456789":
+            self.delay = SPEEDS[int(ch) - 1]
+        elif ch == "c":
+            self.scheme = (self.scheme + 1) % len(SCHEMES)
+            self.redraw()
+
+    # waits, handling keys and resizes as they come in
+    def sleep(self, secs):
+        r, _, _ = select.select([sys.stdin], [], [], secs)
+        if r:
+            for ch in os.read(sys.stdin.fileno(), 64).decode(errors="ignore"):
+                self.key(ch)
+
+    def run(self):
+        while True:
+            if self.resized:
+                self.resized = False
+                self.reset_grid()
+            self.step()
+            out.flush()
+            self.sleep(self.delay)
+
+
+def main():
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    out.write("\033[?25l\033[0m")
+    snake = Snake()
+
+    def on_winch(*_):
+        snake.resized = True
+
+    def bye(*_):
+        raise SystemExit
+
+    signal.signal(signal.SIGWINCH, on_winch)
+    signal.signal(signal.SIGTERM, bye)
+    signal.signal(signal.SIGHUP, bye)
+    try:
+        tty.setcbreak(fd)
+        snake.run()
+    except (SystemExit, KeyboardInterrupt):
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        out.write("\033[0m\033[2J\033[?25h")
+        out.flush()
+
+
+if __name__ == "__main__":
+    main()

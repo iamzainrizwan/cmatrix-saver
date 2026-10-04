@@ -8,9 +8,10 @@ its own.
 After 5 minutes without input, or straight away from a keyboard shortcut, a
 fullscreen [kitty](https://sw.kovidgoyal.net/kitty/) window opens on every
 monitor. The desktop fades to black, a title decrypts out of scrambled glyphs,
-and then `cmatrix` (or [pipes.sh](https://github.com/pipeseroni/pipes.sh), if
-it's installed) runs in your terminal's colours. A handful of keys control it
-while it runs; anything else, or moving the mouse, closes it.
+and then a scene runs: `cmatrix` in your terminal's colours,
+[pipes.sh](https://github.com/pipeseroni/pipes.sh) if it's installed, or a
+snake that steers itself around the screen eating `%`s. A handful of keys
+control it while it runs; anything else, or moving the mouse, closes it.
 
 - **Primary monitor:** decrypts `<hostname> \\ idle`, then shows a status bar
   with the hostname, what's playing, idle time, battery, date and a clock.
@@ -20,6 +21,11 @@ while it runs; anything else, or moving the mouse, closes it.
   a browser, mpv: anything that speaks MPRIS).
 - **Low battery:** on battery at 20% or less, it shows plain black instead of
   animating, to save power.
+- **Claude Code notices:** a strip along the top lists
+  [Claude Code](https://claude.com/claude-code) sessions that finished or need
+  your input while the saver was up. It only shows what's new, and takes no
+  space when there's nothing to show. Notices come from small source scripts,
+  so you can add your own.
 - It doesn't trigger while something is inhibiting idle (a playing video, a
   presentation) or while the screen is locked.
 
@@ -33,8 +39,8 @@ while it runs; anything else, or moving the mouse, closes it.
   kitty in `~/.local/bin`. That copy is preferred automatically.
 - `cmatrix`, `tmux` (tested with 3.4), `python3-gi`, and `gdbus` (ships with
   GLib).
-- Optional: `pipes.sh`. When it's installed, each run picks cmatrix or pipes at
-  random.
+- Optional: `pipes.sh`. Each run picks a scene at random from cmatrix, pipes
+  (when it's installed) and snake.
 
 ```sh
 sudo apt install cmatrix tmux python3-gi
@@ -47,13 +53,18 @@ sudo apt install pipes-sh    # optional
 git clone https://github.com/iamzainrizwan/cmatrix-saver
 cd cmatrix-saver
 install -Dm755 cmatrix-saver cmatrix-saver-scene -t ~/.local/bin/
+install -Dm755 scenes/* -t ~/.config/cmatrix-saver/scenes/
+install -Dm755 sources/* -t ~/.config/cmatrix-saver/sources/
 install -Dm644 cmatrix-saver.service -t ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now cmatrix-saver
 ```
 
 Both scripts have to sit in the same directory, because `cmatrix-saver` looks
-for `cmatrix-saver-scene` next to itself. If you install them somewhere other
+for `cmatrix-saver-scene` next to itself. Scenes and notice sources are found
+in `scenes/` and `sources/` next to the scripts, or in
+`~/.config/cmatrix-saver/`, so a clone symlinked into `~/.local/bin` works
+too. If you install them somewhere other
 than `~/.local/bin`, change `ExecStart` in the service file to match.
 
 Set GNOME's own screen blank (**Settings → Power → Screen Blank**) to longer
@@ -68,7 +79,8 @@ While it's showing:
 |---|---|
 | `space` | pause / resume |
 | `1`–`9` | speed, `9` fastest (pipes: 20–100 fps) |
-| `c` | colour: cycles cmatrix's colours, toggles pipes' colour |
+| `c` | colour: cycles cmatrix's colours, toggles pipes' colour, swaps the snake between red and grey |
+| `s` | next scene: cmatrix → pipes → snake → … |
 | `n` | next track |
 | `p` | play / pause music |
 | `t` | status bar on / off |
@@ -77,7 +89,9 @@ While it's showing:
 | `esc`, `q`, mouse, any other key | close it |
 
 `n` and `p` go to whichever media player is playing, or a paused one if none
-is.
+is. With more than one monitor, the keys that change the scene (`space`,
+`1`–`9`, `c`, `s`, `r`) apply to every monitor at once, since you can't move
+focus to another monitor's window without closing the saver.
 
 ## Usage
 
@@ -108,6 +122,62 @@ is already showing, it does nothing.
 of the hostname. You can also bind a second shortcut with a fixed message, like
 `cmatrix-saver now "lunch"`.
 
+## Claude Code notices
+
+Add the `claude` source as a hook in `~/.claude/settings.json`, on three
+events:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "\"$HOME\"/.config/cmatrix-saver/sources/claude hook" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "\"$HOME\"/.config/cmatrix-saver/sources/claude hook" }] }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|elicitation_dialog",
+        "hooks": [{ "type": "command", "command": "\"$HOME\"/.config/cmatrix-saver/sources/claude hook" }]
+      }
+    ]
+  }
+}
+```
+
+If you already have hooks on these events, add the command next to them. While
+the saver is up, the strip along the top of the primary monitor shows each
+session's latest state, sessions waiting for input first:
+
+- **needs input:** a permission prompt or a question, with what it's asking.
+- **done:** the session finished its turn.
+
+A session drops off again once you reply to it from anywhere, such as your
+phone. Sessions running in a git worktree are listed under their repo's name.
+
+## Your own scenes and notices
+
+A **scene** is any executable in `~/.config/cmatrix-saver/scenes/`. It draws to
+its terminal until it's killed. The saver passes it `1`–`9` (speed) and `c`
+(colour) as plain keypresses on stdin, and pauses it by stopping the process.
+It joins the random pick and the `s` cycle under its file name. See
+`scenes/snake` for an example.
+
+A **notice source** is any executable in `~/.config/cmatrix-saver/sources/`.
+The saver runs `<source> list <since>` every 2 seconds, where `<since>` is when
+the saver came up, in epoch milliseconds. The source prints one tab-separated
+line per notice:
+
+```
+<epoch ms>	<urgent|info>	<title>	<detail>
+```
+
+Urgent notices are listed first and get a red label. If the source also needs
+to collect events in the background (watching D-Bus, say), it can answer
+`<source> watch` with a long-running process, which the service keeps running.
+A file with the same name as a built-in one replaces it.
+
 ## Configuration
 
 Settings are environment variables. For the service, set them with
@@ -125,7 +195,9 @@ Environment=CMATRIX_SAVER_IDLE=600
 | `CMATRIX_SAVER_GREY` | `0` | `1` turns the green rain grey (dark grey trail, off-white heads), whatever your kitty colours are |
 | `CMATRIX_SAVER_NOWPLAYING` | `1` | `0` hides the now-playing track |
 | `CMATRIX_SAVER_LOW_BATTERY` | `20` | at or below this battery %, while discharging, show plain black instead |
-| `CMATRIX_SAVER_SCENES` | `cmatrix pipes` | scenes to pick from (pipes only if installed) |
+| `CMATRIX_SAVER_SCENES` | all of them | scenes to pick from and cycle through, in order, e.g. `cmatrix snake` |
+| `CMATRIX_SAVER_SOURCES` | all of them | notice sources to show, e.g. `claude` |
+| `CMATRIX_SAVER_NOTICES` | `5` | rows the notices strip can take before it shows `+N more` |
 | `CMATRIX_SAVER_AWAY` | | away message for every run, in place of the hostname |
 | `CMATRIX_SAVER_SINGLE` | `0` | `1` opens one native Wayland window instead of one per monitor |
 
@@ -137,7 +209,16 @@ Environment=CMATRIX_SAVER_IDLE=600
 - **`cmatrix-saver-scene`** runs inside each window. It fades the window in
   through kitty's remote control, plays the decrypt title, then starts the
   scene under a throwaway tmux server. That server draws the status bar and
-  holds the key bindings.
+  holds the key bindings. On the primary monitor, a second pane above the scene
+  shows the notices. It stays zoomed out of the way until there's something to
+  show.
+- **Notices start when the saver does:** Mutter's idle time also counts the
+  minutes you spend reading the screen without touching anything. So anything
+  that happened before the saver covered the screen, you might already have
+  seen.
+- **One key, every monitor:** each monitor's window has its own tmux server, and
+  only the focused one gets keypresses. The key handler works out what to do
+  from that window, then does it on every saver window's tmux server.
 - **Keys vs. closing:** Mutter's idle time resets for any input, so on its own
   a key press looks the same as the mouse moving. Each saver key leaves a
   timestamp. When the idle time resets within 1.5 s of that timestamp, the
