@@ -42,9 +42,10 @@ def hook():
     with open(LOG) as f:
         lines = f.readlines()
     if len(lines) > 500:
-        with open(LOG + ".tmp", "w") as f:
+        tmp = f"{LOG}.{os.getpid()}"  # two hooks trimming at once don't share it
+        with open(tmp, "w") as f:
             f.writelines(lines[-200:])
-        os.replace(LOG + ".tmp", LOG)
+        os.replace(tmp, LOG)
 
 
 def list_(since):
