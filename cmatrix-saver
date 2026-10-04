@@ -3,10 +3,11 @@
 #
 # Polls Mutter's IdleMonitor; after IDLE_SECS of no input it opens a
 # fullscreen kitty on every monitor running cmatrix-saver-scene (fade-in +
-# decrypt title, then cmatrix in your terminal's own colours —
-# CMATRIX_SAVER_GREY=1 turns the green rain grey — with a tmux status bar:
-# host, now playing, idle, battery, clock).
-# Any key/mouse input resets the idle timer and this loop kills the windows.
+# decrypt title, then a scene: cmatrix in your terminal's own colours —
+# CMATRIX_SAVER_GREY=1 turns its green rain grey — pipes.sh or snake, with
+# a tmux status bar on the primary monitor: host, now playing, idle,
+# battery, clock). Input resets the idle timer and this loop kills the
+# windows (unless it was a saver key, see below).
 # (Not cmatrix -s: kitty's startup terminal replies count as a "keystroke"
 # and it quits instantly.) Skips triggering while something holds an
 # idle inhibitor (video playback, presentations) or the screen is locked.
@@ -125,7 +126,7 @@ launch() {
     return
   fi
   # the scene gives the primary monitor the host title + status bar; the
-  # others decrypt the time/date instead and run bare cmatrix
+  # others decrypt the time/date instead and run the same scene, no bar
   local placements=()
   for m in "${mons[@]}"; do
     read -r x y primary <<<"$m"

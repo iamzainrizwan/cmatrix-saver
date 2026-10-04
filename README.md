@@ -19,8 +19,9 @@ control it while it runs; anything else, or moving the mouse, closes it.
   with no status bar.
 - **Now playing:** the track from whichever media player is playing (Spotify,
   a browser, mpv: anything that speaks MPRIS).
-- **Low battery:** on battery at 20% or less, it shows plain black instead of
-  animating, to save power.
+- **Low battery:** if it starts on battery at 20% or less, it shows plain black
+  instead of animating, to save power. Then there are no keys, notices or
+  status bar, and any key closes it.
 - **Claude Code notices:** a strip along the top lists
   [Claude Code](https://claude.com/claude-code) sessions that finished or need
   your input while the saver was up. It only shows what's new, and takes no
@@ -37,13 +38,13 @@ control it while it runs; anything else, or moving the mouse, closes it.
   package is too old. Distro packages often lag, so use the
   [official installer](https://sw.kovidgoyal.net/kitty/binary/), which puts
   kitty in `~/.local/bin`. That copy is preferred automatically.
-- `cmatrix`, `tmux` (tested with 3.4), `python3-gi`, and `gdbus` (ships with
-  GLib).
+- `cmatrix`, `tmux` (tested with 3.4), `python3-gi`, `gdbus` (ships with
+  GLib), and `xwininfo`/`xprop` (`x11-utils`) for multiple monitors.
 - Optional: `pipes.sh`. Each run picks a scene at random from cmatrix, pipes
   (when it's installed) and snake.
 
 ```sh
-sudo apt install cmatrix tmux python3-gi
+sudo apt install cmatrix tmux python3-gi x11-utils
 sudo apt install pipes-sh    # optional
 ```
 
@@ -63,9 +64,9 @@ systemctl --user enable --now cmatrix-saver
 Both scripts have to sit in the same directory, because `cmatrix-saver` looks
 for `cmatrix-saver-scene` next to itself. Scenes and notice sources are found
 in `scenes/` and `sources/` next to the scripts, or in
-`~/.config/cmatrix-saver/`, so a clone symlinked into `~/.local/bin` works
-too. If you install them somewhere other
-than `~/.local/bin`, change `ExecStart` in the service file to match.
+`~/.config/cmatrix-saver/` (`$XDG_CONFIG_HOME` if you set it). So a clone
+symlinked into `~/.local/bin` works too. If you install the scripts somewhere
+other than `~/.local/bin`, change `ExecStart` in the service file to match.
 
 Set GNOME's own screen blank (**Settings → Power → Screen Blank**) to longer
 than the saver's idle time. Otherwise the screen turns off before `cmatrix`
@@ -85,13 +86,14 @@ While it's showing:
 | `p` | play / pause music |
 | `t` | status bar on / off |
 | `r` | replay the title |
-| `?` | list the keys |
+| `?` | list the keys (any key closes the list, not the saver) |
 | `esc`, `q`, mouse, any other key | close it |
 
 `n` and `p` go to whichever media player is playing, or a paused one if none
-is. With more than one monitor, the keys that change the scene (`space`,
-`1`–`9`, `c`, `s`, `r`) apply to every monitor at once, since you can't move
-focus to another monitor's window without closing the saver.
+is. With more than one monitor, only one window has focus, and you can't move
+focus without closing the saver. So the keys that change the scene (`space`,
+`1`–`9`, `c`, `s`, `r`) apply to every monitor at once, and `t` and `?` always
+act on the primary monitor, where the status bar is.
 
 ## Usage
 
@@ -119,8 +121,8 @@ is already showing, it does nothing.
 ### Away message
 
 `cmatrix-saver now "back at 3"` shows the message in the status bar, in place
-of the hostname. You can also bind a second shortcut with a fixed message, like
-`cmatrix-saver now "lunch"`.
+of the hostname. Messages longer than 40 characters are cut short. You can also
+bind a second shortcut with a fixed message, like `cmatrix-saver now "lunch"`.
 
 ## Claude Code notices
 
@@ -146,7 +148,9 @@ events:
 }
 ```
 
-If you already have hooks on these events, add the command next to them. While
+If you already have hooks on these events, add the command next to them. If you
+symlinked a clone instead of installing, point it at the clone's
+`sources/claude`. While
 the saver is up, the strip along the top of the primary monitor shows each
 session's latest state, sessions waiting for input first:
 
@@ -154,14 +158,16 @@ session's latest state, sessions waiting for input first:
 - **done:** the session finished its turn.
 
 A session drops off again once you reply to it from anywhere, such as your
-phone. Sessions running in a git worktree are listed under their repo's name.
+phone. Each session is listed under its working directory's name, and sessions
+in a Claude Code worktree (`.claude/worktrees/`) under the repo they came from.
 
 ## Your own scenes and notices
 
 A **scene** is any executable in `~/.config/cmatrix-saver/scenes/`. It draws to
 its terminal until it's killed. The saver passes it `1`–`9` (speed) and `c`
-(colour) as plain keypresses on stdin, and pauses it by stopping the process.
-It joins the random pick and the `s` cycle under its file name. See
+(colour) as plain keypresses on stdin, and pauses it by stopping its process
+and everything under it. If it exits on its own, it's started again a second
+later. It joins the random pick and the `s` cycle under its file name. See
 `scenes/snake` for an example.
 
 A **notice source** is any executable in `~/.config/cmatrix-saver/sources/`.
@@ -175,8 +181,11 @@ line per notice:
 
 Urgent notices are listed first and get a red label. If the source also needs
 to collect events in the background (watching D-Bus, say), it can answer
-`<source> watch` with a long-running process, which the service keeps running.
-A file with the same name as a built-in one replaces it.
+`<source> watch` with a long-running process, which the service starts once,
+alongside itself.
+
+A file with the same name as one in the repo's `scenes/` or `sources/` replaces
+it. The `cmatrix` and `pipes` scenes can't be replaced.
 
 ## Configuration
 
@@ -192,7 +201,7 @@ Environment=CMATRIX_SAVER_IDLE=600
 |---|---|---|
 | `CMATRIX_SAVER_IDLE` | `300` | seconds of no input before it starts |
 | `CMATRIX_SAVER_TITLE` | `<hostname> \\ idle` | title decrypted on the primary monitor |
-| `CMATRIX_SAVER_GREY` | `0` | `1` turns the green rain grey (dark grey trail, off-white heads), whatever your kitty colours are |
+| `CMATRIX_SAVER_GREY` | `0` | `1` maps the window's ANSI green and white to greys, so cmatrix's default green rain shows grey (dark grey trail, off-white heads), whatever your kitty colours are |
 | `CMATRIX_SAVER_NOWPLAYING` | `1` | `0` hides the now-playing track |
 | `CMATRIX_SAVER_LOW_BATTERY` | `20` | at or below this battery %, while discharging, show plain black instead |
 | `CMATRIX_SAVER_SCENES` | all of them | scenes to pick from and cycle through, in order, e.g. `cmatrix snake` |
@@ -225,8 +234,12 @@ Environment=CMATRIX_SAVER_IDLE=600
   saver stays open. Otherwise it closes.
 - **Multiple monitors:** Mutter ignores the position a native Wayland window
   asks for. So each window runs under XWayland with `--position` set inside its
-  monitor, then goes fullscreen there. The trade-off is that XWayland renders
-  at 1×, so text is slightly soft on monitors with fractional scaling.
+  monitor, then goes fullscreen there. Mutter can ignore that position too
+  (seen with a fractionally scaled monitor: every window opened on the same
+  one), so once each window is up the saver also asks Mutter to fullscreen it
+  on its own monitor (`_NET_WM_FULLSCREEN_MONITORS`). The trade-off is that
+  XWayland renders at 1×, so text is slightly soft on monitors with fractional
+  scaling.
   `CMATRIX_SAVER_SINGLE=1` swaps this for a single, sharp native window.
 - **Why not `cmatrix -s`:** kitty answers terminal queries when it starts,
   `cmatrix -s` counts those answers as a key press, and quits immediately.
