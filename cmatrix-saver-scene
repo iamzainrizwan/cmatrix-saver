@@ -216,8 +216,9 @@ def ago(ms):  # or, for something still to come (a calendar event), how soon
 lw = min(max([width(i[0]) for i in items] + [0]), 12)
 tw = min(max([width(i[3]) for i in items] + [0]), max(cols // 4, 8))
 aw = max([len(ago(i[1])) for i in items] + [0])
-# two spaces of margin, label (+2 padding), two, title, two, detail, " · ", age
-dw = max(cols - 2 - (lw + 2) - 2 - tw - 2 - 3 - aw, 0)
+# label (+2 padding, flush left like the status bar label), two, title, two,
+# detail, " · ", age
+dw = max(cols - (lw + 2) - 2 - tw - 2 - 3 - aw, 0)
 dw = min(dw, max([width(i[4]) for i in items] + [0]))
 red, grey, white, dim, off = ("\033[" + c for c in (
     "1;38;2;0;0;0;48;2;204;34;34m", "38;2;102;102;102m", "1;38;2;224;224;224m",
@@ -226,11 +227,11 @@ rows = []
 for src, ms, level, title, detail in items:
     label = " " + pad(fit(src, lw), lw) + " "
     label = (red if level == "urgent" else "\033[38;2;204;34;34m") + label + off
-    row = (f"  {label}  {white}{pad(fit(title, tw), tw)}{off}  {grey}{pad(fit(detail, dw), dw)}{off}"
+    row = (f"{label}  {white}{pad(fit(title, tw), tw)}{off}  {grey}{pad(fit(detail, dw), dw)}{off}"
            f"{dim} · {ago(ms):>{aw}}{off}")
     rows.append(row + "\033[K")
 if more:
-    rows.append(f"  {dim}+{more} more{off}\033[K")
+    rows.append(f" {dim}+{more} more{off}\033[K")
 print("\n".join(rows), end="")
 ' "$@"
 }
