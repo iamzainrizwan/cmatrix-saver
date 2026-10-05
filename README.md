@@ -169,8 +169,10 @@ in a Claude Code worktree (`.claude/worktrees/`) under the repo they came from.
 
 ## Calendar
 
-The `calendar` source shows your next event today: its start time, its title,
-and how soon (`in 25m`). It turns red 10 minutes before the start. All-day,
+The `calendar` source shows your next event today: its start time, its name
+and location, and how soon (`in 25m`). Timetable feeds that shorten the title
+and put the full name in the description (`Description: …`) show the full
+name. It turns red 10 minutes before the start. All-day,
 cancelled and declined events are left out, and it shows nothing once the
 day's events are over.
 

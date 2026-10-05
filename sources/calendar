@@ -2,7 +2,7 @@
 # cmatrix-saver notice source for your calendar: the next event today.
 #
 #   calendar list SINCE  the next timed event that starts later today, as a
-#                        notice line: <start ms> <urgent|info> <HH:MM> <summary>
+#                        notice line: <start ms> <urgent|info> <HH:MM> <name · where>
 #                        (urgent from 10 minutes before it starts)
 #
 # Events come from evolution-data-server, the store behind GNOME Calendar
@@ -91,7 +91,7 @@ def occurrences(events, start, end, me=()):
         dtstart = when(*props["DTSTART"][0])
         if dtstart is None:
             continue  # all day
-        summary = unescape(props.get("SUMMARY", [({}, "")])[0][1]).strip() or "(no title)"
+        summary = describe(props)
         uid = props.get("UID", [({}, "")])[0][1]
         if "RECURRENCE-ID" in props:  # a moved or edited occurrence of a series
             moved.add((uid, recurrence_id(props)))
@@ -249,6 +249,25 @@ def tidy(summary):
     return " ".join(words) or summary
 
 
+def describe(props):
+    """What the notice says: the event's name, then where.
+
+    Some feeds (university timetables, say) shorten the title and put the
+    full name in the description, as a "Description: Foundations of
+    Computing 2" line; that wins when it's there."""
+    def text(name):
+        return unescape(props.get(name, [({}, "")])[0][1]).strip()
+    name = ""
+    for line in text("DESCRIPTION").splitlines():
+        key, _, value = line.partition(":")
+        if key.strip().lower() in ("description", "module", "title") and value.strip():
+            name = value.strip()
+            break
+    name = " ".join((name or tidy(text("SUMMARY")) or "(no title)").split())
+    where = " ".join(text("LOCATION").split())
+    return f"{name} · {where}" if where and where.lower() not in name.lower() else name
+
+
 def list_(now=None):
     now = now or datetime.now().astimezone()
     end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -258,7 +277,7 @@ def list_(now=None):
     dt, summary = upcoming[0]
     level = "urgent" if (dt - now).total_seconds() <= SOON else "info"
     print(int(dt.timestamp() * 1000), level, dt.astimezone().strftime("%H:%M"),
-          tidy(summary), sep="\t")
+          summary, sep="\t")
 
 
 try:
