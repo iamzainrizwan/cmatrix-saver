@@ -299,7 +299,7 @@ rain() {
   cmatrix) cmd=(cmatrix) ;;
   # palette colours only: red, blue, magenta, white (pipes' own list has
   # black, invisible here, and green)
-  pipes) cmd=("$(command -v pipes.sh || command -v pipes)" -p 4 -R -r 4000 -c 1 -c 4 -c 5 -c 7) ;;
+  pipes) cmd=("$(command -v pipes.sh || command -v pipes)" -p 4 -R -r 0 -c 1 -c 4 -c 5 -c 7) ;;
   *) cmd=("$(scene_files | grep "/$scene\$" | tail -1)") ;;
   esac
   if ! command -v "${cmd[0]}" >/dev/null; then
@@ -310,8 +310,8 @@ rain() {
     *) tmux set -g @scene "$path"; exec "$SELF" rain ;;
     esac
   fi
-  local child=
-  trap 'kill -CONT $child 2>/dev/null; kill -TERM $child 2>/dev/null' EXIT
+  local child= wiper=
+  trap 'kill $wiper 2>/dev/null; kill -CONT $child 2>/dev/null; kill -TERM $child 2>/dev/null' EXIT
   trap exit HUP TERM
   # a scene that exits by itself (a crash) starts again rather than leaving
   # the screen blank; closing the window or switching scene kills this loop
@@ -322,8 +322,39 @@ rain() {
     # A fresh scene starts at its own defaults, so reset what the keys track.
     tmux set -g @child "$child" \; set -g @paused 0 \; set -g @rain "$TMUX_PANE" \; \
       set -g @fps 75 \; set -g @colour 1
+    [[ $scene == pipes ]] && { wipes "$child" & wiper=$!; }
     wait "$child"
+    kill $wiper 2>/dev/null
     sleep 1
+  done
+}
+
+# pipes' own -r reset is a `tput reset`: the whole screen snaps to black in
+# one frame. Instead it runs with no limit and this clears it as a
+# dissolve: every so often (as often as -r 4000 would have, so sooner at a
+# higher fps) pipes is stopped, the screen's cells are blanked in a random
+# order over about a second, and it carries on. \e7/\e8 put pipes' cursor
+# and colour back, in case it was stopped between moving and drawing.
+wipes() {
+  local child=$1 rows cols frame
+  while :; do
+    sleep $((1000 / $(tmux show -gv @fps 2>/dev/null || echo 75)))
+    (($(tmux show -gv @paused 2>/dev/null || echo 0))) && continue
+    kill -0 "$child" 2>/dev/null || return
+    # a tput pipes forked can exit before the kill reaches it: not a failure
+    kill -STOP $(tree "$child") 2>/dev/null
+    read -r rows cols < <(stty size </dev/tty)
+    printf '\e7\e[0m'
+    shuf -i 0-$((rows * cols - 1)) |
+      awk -v c="$cols" -v n=$((rows * cols / 25 + 1)) \
+        '{ printf "\033[%d;%dH ", int($1 / c) + 1, $1 % c + 1 } NR % n == 0 { print "" } END { print "" }' |
+      while IFS= read -r frame; do
+        printf '%s' "$frame"
+        sleep 0.04
+      done
+    printf '\e8'
+    # left stopped if pause was pressed mid-wipe
+    (($(tmux show -gv @paused 2>/dev/null || echo 0))) || kill -CONT $(tree "$child") 2>/dev/null
   done
 }
 
