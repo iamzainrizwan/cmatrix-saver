@@ -230,6 +230,25 @@ def events_today(start, end):
     return sorted(out)
 
 
+SMALL = {"a", "an", "and", "at", "by", "for", "in", "of", "on", "or", "the", "to", "with"}
+
+
+def tidy(summary):
+    """Calm down a timetable-style title: 5CCS2FC2 FOUNDATIONS OF SEM1
+    000001/SmG/14 -> 5CCS2FC2 Foundations of SEM1. Group and room codes (a
+    slash, letters and digits) go; an all-caps title gets title case, leaving words
+    with digits in them (module codes) as they are."""
+    words = [w for w in summary.split()
+             if not ("/" in w and any(c.isdigit() for c in w) and any(c.isalpha() for c in w))]
+    letters = [c for w in words if not any(d.isdigit() for d in w) for c in w if c.isalpha()]
+    if len(letters) > 3 and all(c.isupper() for c in letters):
+        words = [w if any(c.isdigit() for c in w)
+                 else w.lower() if i and w.lower() in SMALL
+                 else re.sub(r"[a-z]", lambda m: m[0].upper(), w.lower(), count=1)
+                 for i, w in enumerate(words)]
+    return " ".join(words) or summary
+
+
 def list_(now=None):
     now = now or datetime.now().astimezone()
     end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -239,7 +258,7 @@ def list_(now=None):
     dt, summary = upcoming[0]
     level = "urgent" if (dt - now).total_seconds() <= SOON else "info"
     print(int(dt.timestamp() * 1000), level, dt.astimezone().strftime("%H:%M"),
-          " ".join(summary.split()), sep="\t")
+          tidy(summary), sep="\t")
 
 
 try:
