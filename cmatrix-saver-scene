@@ -31,14 +31,15 @@ CMD=$RUN/scene
 PATH=$HOME/.local/bin:$PATH:/usr/games
 
 battery() {
-  local b pct status colour='#666666' mark=''
+  local b pct status colour='#666666'
   for b in /sys/class/power_supply/BAT*; do
     [[ -r $b/capacity ]] || continue
     pct=$(<"$b/capacity")
     status=$(<"$b/status")
+    # on AC: green rather than a charging mark
+    [[ $status == Charging || $status == "Not charging" || $status == Full ]] && colour='#44aa44'
     [[ $status == Discharging ]] && ((pct <= LOW)) && colour='#ff4444'
-    [[ $status == Charging || $status == "Not charging" || $status == Full ]] && mark=' ⚡'
-    printf '#[fg=%s]BAT %s%%%s' "$colour" "$pct" "$mark"
+    printf '#[fg=%s]BAT %s%%' "$colour" "$pct"
     return
   done
 }
