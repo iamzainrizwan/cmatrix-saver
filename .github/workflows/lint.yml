@@ -1,0 +1,21 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck cmatrix-saver cmatrix-saver-scene install.sh
+      - name: python syntax
+        # the scenes and sources have no .py extension, so compile them by hand
+        run: |
+          python3 - scenes/snake sources/* <<'EOF'
+          import sys
+          for f in sys.argv[1:]:
+              compile(open(f).read(), f, "exec")
+          EOF

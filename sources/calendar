@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+# cmatrix-saver notice source for your calendar: the next event today.
+#
+#   calendar list SINCE  the next timed event that starts later today, as a
+#                        notice line: <start ms> <urgent|info> <HH:MM> <summary>
+#                        (urgent from 10 minutes before it starts)
+#
+# Events come from evolution-data-server, the store behind GNOME Calendar
+# and the top bar's calendar, so any calendar those show works: a Google,
+# Microsoft or Nextcloud account added in Settings > Online Accounts, or a
+# local one. Only calendars ticked in GNOME Calendar are read;
+# CMATRIX_SAVER_CALENDARS (comma-separated names) narrows that. All-day,
+# cancelled and declined events are skipped. SINCE is ignored: the next
+# event matters however long the saver has been up.
+import os, re, sys, time
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+SOON = 10 * 60  # seconds before the start it turns urgent
+EDS = "org.gnome.evolution.dataserver."
+
+
+def unfold(text):
+    return re.sub(r"\r?\n[ \t]", "", text).splitlines()
+
+
+def unescape(v):
+    return re.sub(r"\\(.)", lambda m: "\n" if m[1] in "nN" else m[1], v)
+
+
+def vevents(text):
+    """Each VEVENT in an iCalendar string, as a list of (name, params, value)."""
+    out, cur = [], None
+    for line in unfold(text):
+        head, _, value = line.partition(":")
+        name, *params = head.split(";")
+        name = name.upper()
+        params = dict(p.split("=", 1) for p in params if "=" in p)
+        if name == "BEGIN" and value.upper() == "VEVENT":
+            cur = []
+        elif name == "END" and value.upper() == "VEVENT" and cur is not None:
+            out.append(cur)
+            cur = None
+        elif cur is not None:
+            cur.append((name, {k.upper(): v for k, v in params.items()}, value))
+    return out
+
+
+def zone(tzid):
+    # TZIDs can carry a prefix, e.g. /freeassociation.sourceforge.net/Europe/London
+    tzid = tzid.strip('"')
+    parts = tzid.strip("/").split("/")
+    for i in range(len(parts)):
+        try:
+            return ZoneInfo("/".join(parts[i:]))
+        except Exception:
+            pass
+    return None
+
+
+def when(params, value):
+    """An iCalendar date-time as an aware datetime, or None for a date (all day)."""
+    value = value.strip()
+    if params.get("VALUE", "").upper() == "DATE" or len(value) == 8:
+        return None
+    utc = value.endswith("Z")
+    dt = datetime.strptime(value.rstrip("Z")[:15], "%Y%m%dT%H%M%S")
+    if utc:
+        return dt.replace(tzinfo=timezone.utc)
+    tz = zone(params["TZID"]) if "TZID" in params else None
+    return dt.replace(tzinfo=tz) if tz else dt.astimezone()  # floating: local time
+
+
+def occurrences(events, start, end, me=()):
+    """(start, summary) of every timed occurrence in [start, end)."""
+    moved, masters, out = set(), [], []
+    for ev in events:
+        props = {}
+        for name, params, value in ev:
+            props.setdefault(name, []).append((params, value))
+        if props.get("STATUS", [({}, "")])[0][1].upper() == "CANCELLED":
+            if "RECURRENCE-ID" in props:  # one cancelled occurrence of a series
+                moved.add((props.get("UID", [({}, "")])[0][1], recurrence_id(props)))
+            continue
+        if declined(props, me):
+            if "RECURRENCE-ID" in props:
+                moved.add((props.get("UID", [({}, "")])[0][1], recurrence_id(props)))
+            continue
+        if "DTSTART" not in props:
+            continue
+        dtstart = when(*props["DTSTART"][0])
+        if dtstart is None:
+            continue  # all day
+        summary = unescape(props.get("SUMMARY", [({}, "")])[0][1]).strip() or "(no title)"
+        uid = props.get("UID", [({}, "")])[0][1]
+        if "RECURRENCE-ID" in props:  # a moved or edited occurrence of a series
+            moved.add((uid, recurrence_id(props)))
+            if start <= dtstart < end:
+                out.append((dtstart, summary))
+        elif "RRULE" in props:
+            masters.append((uid, dtstart, summary, props))
+        elif start <= dtstart < end:
+            out.append((dtstart, summary))
+    for uid, dtstart, summary, props in masters:
+        for dt in expand(dtstart, props, start, end):
+            if (uid, dt) not in moved:
+                out.append((dt, summary))
+    return sorted(out)
+
+
+def recurrence_id(props):
+    return when(*props["RECURRENCE-ID"][0])
+
+
+def declined(props, me):
+    for params, value in props.get("ATTENDEE", []):
+        addr = value.lower().removeprefix("mailto:")
+        if addr in me and params.get("PARTSTAT", "").upper() == "DECLINED":
+            return True
+    return False
+
+
+def expand(dtstart, props, start, end):
+    try:
+        from dateutil.rrule import rruleset, rrulestr
+    except ImportError:
+        return []  # no python3-dateutil: one-off events still show
+    rules = rruleset()
+    for _, value in props["RRULE"]:
+        try:
+            rules.rrule(rrulestr(value, dtstart=dtstart))
+        except ValueError:  # e.g. a floating UNTIL on a zoned series
+            value = re.sub(r"UNTIL=(\d{8}T\d{6})(?!Z)", r"UNTIL=\1Z", value)
+            rules.rrule(rrulestr(value, dtstart=dtstart))
+    for name in ("RDATE", "EXDATE"):
+        for params, value in props.get(name, []):
+            for v in value.split(","):
+                dt = when(params, v)
+                if dt:
+                    (rules.rdate if name == "RDATE" else rules.exdate)(dt)
+    # between() is exclusive of the end; look back a minute so an exact
+    # start at `start` counts
+    return [dt for dt in rules.between(start - timedelta(minutes=1), end) if start <= dt < end]
+
+
+def bus_name(bus, prefix):
+    """The newest versioned EDS bus name, e.g. ...Calendar8."""
+    from gi.repository import GLib
+    names = set()
+    for method in ("ListNames", "ListActivatableNames"):
+        names |= set(bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                   "org.freedesktop.DBus", method, None,
+                                   GLib.VariantType("(as)"), 0, -1, None).unpack()[0])
+    found = [(int(n[len(prefix):]), n) for n in names
+             if n.startswith(prefix) and n[len(prefix):].isdigit()]
+    return max(found)[1] if found else None
+
+
+def calendars(bus):
+    """(uid, own addresses) of each calendar to read."""
+    from gi.repository import GLib
+    name = bus_name(bus, EDS + "Sources")
+    objs = bus.call_sync(name, "/org/gnome/evolution/dataserver/SourceManager",
+                         "org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+                         None, None, 0, -1, None).unpack()[0]
+    sources = {}
+    for ifaces in objs.values():
+        s = ifaces.get(EDS + "Source", {})
+        if s.get("UID"):
+            sources[s["UID"]] = keyfile(s.get("Data", ""))
+    wanted = {n.strip().casefold() for n in os.environ.get("CMATRIX_SAVER_CALENDARS", "").split(",") if n.strip()}
+    out = []
+    for uid, data in sources.items():
+        cal = data.get("Calendar")
+        if cal is None or data.get("Data Source", {}).get("Enabled", "true") != "true":
+            continue
+        name = data.get("Data Source", {}).get("DisplayName", "")
+        if wanted:
+            if name.casefold() not in wanted:
+                continue
+        elif cal.get("Selected", "true") != "true":
+            continue
+        out.append((uid, addresses(uid, sources)))
+    return out
+
+
+def keyfile(text):
+    groups, cur = {}, None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            cur = groups.setdefault(line[1:-1], {})
+        elif cur is not None and "=" in line:
+            k, v = line.split("=", 1)
+            cur[k.strip()] = v.strip()
+    return groups
+
+
+def addresses(uid, sources):
+    """Email addresses on a calendar and the account above it: you, for RSVPs."""
+    found, seen = set(), set()
+    while uid in sources and uid not in seen:
+        seen.add(uid)
+        data = sources[uid]
+        for group in data.values():
+            for v in group.values():
+                found |= {a.lower() for a in re.findall(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", v)}
+        uid = data.get("Data Source", {}).get("Parent")
+    return found
+
+
+def events_today(start, end):
+    from gi.repository import Gio, GLib
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+    factory = bus_name(bus, EDS + "Calendar")
+    span = '(occur-in-time-range? (make-time "%s") (make-time "%s"))' % tuple(
+        t.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ") for t in (start, end))
+    out = []
+    for uid, me in calendars(bus):
+        try:
+            path, name = bus.call_sync(factory, "/org/gnome/evolution/dataserver/CalendarFactory",
+                                       EDS + "CalendarFactory", "OpenCalendar",
+                                       GLib.Variant("(s)", (uid,)), None, 0, 5000, None).unpack()
+            objs = bus.call_sync(name, path, EDS + "Calendar", "GetObjectList",
+                                 GLib.Variant("(s)", (span,)), None, 0, 5000, None).unpack()[0]
+        except Exception:
+            continue  # one broken calendar shouldn't hide the rest
+        events = [ev for o in objs for ev in vevents(o)]
+        out += occurrences(events, start, end, me)
+    return sorted(out)
+
+
+def list_(now=None):
+    now = now or datetime.now().astimezone()
+    end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    upcoming = [(dt, s) for dt, s in events_today(now, end) if dt > now]
+    if not upcoming:
+        return
+    dt, summary = upcoming[0]
+    level = "urgent" if (dt - now).total_seconds() <= SOON else "info"
+    print(int(dt.timestamp() * 1000), level, dt.astimezone().strftime("%H:%M"),
+          " ".join(summary.split()), sep="\t")
+
+
+try:
+    if sys.argv[1:2] == ["list"]:
+        list_()
+except Exception:
+    pass  # never break the saver over this

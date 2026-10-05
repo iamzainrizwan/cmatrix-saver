@@ -208,9 +208,11 @@ if len(items) > maxrows:
 else:
     more = 0
 now = time.time() * 1000
-def ago(ms):
-    m = int((now - int(ms)) // 60000)
-    return "now" if m < 1 else f"{m}m" if m < 60 else f"{m // 60}h{m % 60:02d}"
+def ago(ms):  # or, for something still to come (a calendar event), how soon
+    ahead = int(ms) > now
+    m = int(abs(now - int(ms)) // 60000) + ahead  # round a wait up, not down
+    t = f"{m}m" if m < 60 else f"{m // 60}h{m % 60:02d}"
+    return "now" if m < 1 else "in " + t if ahead else t
 lw = min(max([width(i[0]) for i in items] + [0]), 12)
 tw = min(max([width(i[3]) for i in items] + [0]), max(cols // 4, 8))
 aw = max([len(ago(i[1])) for i in items] + [0])
@@ -311,7 +313,7 @@ rain() {
     *) tmux set -g @scene "$path"; exec "$SELF" rain ;;
     esac
   fi
-  local child= wiper=
+  local child='' wiper=''
   trap 'kill $wiper 2>/dev/null; kill -CONT $child 2>/dev/null; kill -TERM $child 2>/dev/null' EXIT
   trap exit HUP TERM
   # a scene that exits by itself (a crash) starts again rather than leaving
@@ -343,6 +345,7 @@ wipes() {
     (($(tmux show -gv @paused 2>/dev/null || echo 0))) && continue
     kill -0 "$child" 2>/dev/null || return
     # a tput pipes forked can exit before the kill reaches it: not a failure
+    # shellcheck disable=SC2046 # one pid per word
     kill -STOP $(tree "$child") 2>/dev/null
     read -r rows cols < <(stty size </dev/tty)
     printf '\e7\e[0m'
@@ -355,6 +358,7 @@ wipes() {
       done
     printf '\e8'
     # left stopped if pause was pressed mid-wipe
+    # shellcheck disable=SC2046
     (($(tmux show -gv @paused 2>/dev/null || echo 0))) || kill -CONT $(tree "$child") 2>/dev/null
   done
 }
@@ -393,6 +397,7 @@ key() {
     (($(tmux show -gv @paused))) && sig=CONT paused=0
     for srv in "${srvs[@]}"; do
       cur=$(t show -gv @child)
+      # shellcheck disable=SC2046
       [[ -n $cur ]] && kill -"$sig" $(tree "$cur") && t set -g @paused "$paused"
     done
     ;;

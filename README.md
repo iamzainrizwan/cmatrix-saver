@@ -14,7 +14,8 @@ snake that steers itself around the screen eating `%`s. A handful of keys
 control it while it runs; anything else, or moving the mouse, closes it.
 
 - **Primary monitor:** decrypts `<hostname> \\ idle`, then shows a status bar
-  with the hostname, what's playing, idle time, battery, date and a clock.
+  with the hostname, what's playing, idle time, battery (green while plugged
+  in), date and a clock.
 - **Other monitors:** decrypt the current time and date, then the same scene
   with no status bar.
 - **Now playing:** the track from whichever media player is playing (Spotify,
@@ -22,11 +23,11 @@ control it while it runs; anything else, or moving the mouse, closes it.
 - **Low battery:** if it starts on battery at 20% or less, it shows plain black
   instead of animating, to save power. Then there are no keys, notices or
   status bar, and any key closes it.
-- **Claude Code notices:** a strip along the top lists
+- **Notices:** a strip along the top lists
   [Claude Code](https://claude.com/claude-code) sessions that finished or need
-  your input while the saver was up. It only shows what's new, and takes no
-  space when there's nothing to show. Notices come from small source scripts,
-  so you can add your own.
+  your input while the saver was up, and your next calendar event today. It
+  takes no space when there's nothing to show. Notices come from small source
+  scripts, so you can add your own.
 - It doesn't trigger while something is inhibiting idle (a playing video, a
   presentation) or while the screen is locked.
 
@@ -40,6 +41,8 @@ control it while it runs; anything else, or moving the mouse, closes it.
   kitty in `~/.local/bin`. That copy is preferred automatically.
 - `cmatrix`, `tmux` (tested with 3.4), `python3-gi`, `gdbus` (ships with
   GLib), and `xwininfo`/`xprop` (`x11-utils`) for multiple monitors.
+- Optional: `python3-dateutil` for repeating events in the
+  [calendar](#calendar) notices.
 - Optional: `pipes.sh`. Each run picks a scene at random from cmatrix, pipes
   (when it's installed) and snake.
 
@@ -53,20 +56,24 @@ sudo apt install pipes-sh    # optional
 ```sh
 git clone https://github.com/iamzainrizwan/cmatrix-saver
 cd cmatrix-saver
-install -Dm755 cmatrix-saver cmatrix-saver-scene -t ~/.local/bin/
-install -Dm755 scenes/* -t ~/.config/cmatrix-saver/scenes/
-install -Dm755 sources/* -t ~/.config/cmatrix-saver/sources/
-install -Dm644 cmatrix-saver.service -t ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now cmatrix-saver
+./install.sh
 ```
 
-Both scripts have to sit in the same directory, because `cmatrix-saver` looks
-for `cmatrix-saver-scene` next to itself. Scenes and notice sources are found
-in `scenes/` and `sources/` next to the scripts, or in
-`~/.config/cmatrix-saver/` (`$XDG_CONFIG_HOME` if you set it). So a clone
-symlinked into `~/.local/bin` works too. If you install the scripts somewhere
-other than `~/.local/bin`, change `ExecStart` in the service file to match.
+This copies the scripts to `~/.local/bin`, the scenes and notice sources to
+`~/.config/cmatrix-saver/` (`$XDG_CONFIG_HOME` if you set it), and starts the
+`cmatrix-saver` user service. After a `git pull`, run it again to update and
+restart the service.
+
+```sh
+./install.sh --link         # symlink this clone instead, to hack on it
+./install.sh --uninstall    # stop the service and remove it all
+BIN=~/bin ./install.sh      # scripts somewhere else (the service follows)
+```
+
+Uninstalling keeps any scene or source in `~/.config/cmatrix-saver/` that
+you've changed. Both scripts have to sit in the same directory, because
+`cmatrix-saver` looks for `cmatrix-saver-scene` next to itself. A linked clone
+finds its scenes and sources in its own `scenes/` and `sources/`.
 
 Set GNOME's own screen blank (**Settings → Power → Screen Blank**) to longer
 than the saver's idle time. Otherwise the screen turns off before `cmatrix`
@@ -149,9 +156,8 @@ events:
 ```
 
 If you already have hooks on these events, add the command next to them. If you
-symlinked a clone instead of installing, point it at the clone's
-`sources/claude`. While
-the saver is up, the strip along the top of the primary monitor shows each
+installed with `--link`, point it at the clone's `sources/claude`. While the
+saver is up, the strip along the top of the primary monitor shows each
 session's latest state, sessions waiting for input first:
 
 - **needs input:** a permission prompt or a question, with what it's asking.
@@ -160,6 +166,29 @@ session's latest state, sessions waiting for input first:
 A session drops off again once you reply to it from anywhere, such as your
 phone. Each session is listed under its working directory's name, and sessions
 in a Claude Code worktree (`.claude/worktrees/`) under the repo they came from.
+
+## Calendar
+
+The `calendar` source shows your next event today: its start time, its title,
+and how soon (`in 25m`). It turns red 10 minutes before the start. All-day,
+cancelled and declined events are left out, and it shows nothing once the
+day's events are over.
+
+It reads from evolution-data-server, the store behind GNOME Calendar and the
+calendar in the top bar. So there's nothing to set up beyond having your
+calendar in GNOME:
+
+1. **Settings → Online Accounts**, add your Google, Microsoft 365 or Nextcloud
+   account, and leave **Calendar** switched on. A local calendar made in GNOME
+   Calendar works too.
+2. Check the events show up in GNOME Calendar (`sudo apt install
+   gnome-calendar` if you don't have it) or in the top bar's calendar.
+
+It reads the calendars ticked in GNOME Calendar's list. To narrow that, set
+`CMATRIX_SAVER_CALENDARS` to their names, comma-separated, e.g.
+`Work,Family`. To turn it off, leave `calendar` out of
+`CMATRIX_SAVER_SOURCES`. Repeating events need `python3-dateutil`
+(`sudo apt install python3-dateutil` if it's missing).
 
 ## Your own scenes and notices
 
@@ -179,7 +208,8 @@ line per notice:
 <epoch ms>	<urgent|info>	<title>	<detail>
 ```
 
-Urgent notices are listed first and get a red label. If the source also needs
+Urgent notices are listed first and get a red label. Each line ends with how
+long ago its time was, or how soon for a time still to come (`in 25m`). If the source also needs
 to collect events in the background (watching D-Bus, say), it can answer
 `<source> watch` with a long-running process, which the service starts once,
 alongside itself.
@@ -206,6 +236,7 @@ Environment=CMATRIX_SAVER_IDLE=600
 | `CMATRIX_SAVER_LOW_BATTERY` | `20` | at or below this battery %, while discharging, show plain black instead |
 | `CMATRIX_SAVER_SCENES` | all of them | scenes to pick from and cycle through, in order, e.g. `cmatrix snake` |
 | `CMATRIX_SAVER_SOURCES` | all of them | notice sources to show, e.g. `claude` |
+| `CMATRIX_SAVER_CALENDARS` | ticked in GNOME Calendar | calendars the `calendar` source reads, by name, comma-separated |
 | `CMATRIX_SAVER_NOTICES` | `5` | rows the notices strip can take before it shows `+N more` |
 | `CMATRIX_SAVER_AWAY` | | away message for every run, in place of the hostname |
 | `CMATRIX_SAVER_SINGLE` | `0` | `1` opens one native Wayland window instead of one per monitor |
@@ -241,6 +272,10 @@ Environment=CMATRIX_SAVER_IDLE=600
   XWayland renders at 1×, so text is slightly soft on monitors with fractional
   scaling.
   `CMATRIX_SAVER_SINGLE=1` swaps this for a single, sharp native window.
+- **Pipes clears as a dissolve:** pipes.sh's own reset is a `tput reset`,
+  which snaps the screen to black in one frame. So it runs without one, and
+  every so often the saver pauses it, blanks the screen's cells in a random
+  order over about a second, and lets it carry on.
 - **Why not `cmatrix -s`:** kitty answers terminal queries when it starts,
   `cmatrix -s` counts those answers as a key press, and quits immediately.
 
