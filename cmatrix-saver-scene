@@ -277,12 +277,16 @@ decrypt() {
     text="$(date '+%H:%M') \\\\ $(date '+%d %b' | tr '[:upper:]' '[:lower:]')"
   fi
   local glyphs='01#$%&@*+=<>/\|[]{}?!~^'
-  local rows cols len frame i reveal out esc=$'\e'
+  local rows cols size='' len frame i reveal out esc=$'\e'
   sleep 0.15 # let the fullscreen resize land before measuring
-  read -r rows cols < <(stty size)
   len=${#text}
   printf '\e[?25l\e[2J'
   for ((frame = 0; frame <= len * 2 + 6; frame++)); do
+    # measured every frame: cmatrix-saver's place() can move the window to
+    # its own monitor (a different size) after the title has started, and
+    # a size read once would leave it off centre there
+    read -r rows cols < <(stty size)
+    [[ $rows:$cols != "$size" ]] && printf '\e[2J' && size=$rows:$cols
     reveal=$((frame / 2))
     out=''
     for ((i = 0; i < len; i++)); do

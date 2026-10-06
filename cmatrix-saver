@@ -56,6 +56,7 @@ KITTEN="$(dirname "$(readlink -f "$KITTY")")/kitten"
 SCENE="$(dirname "$(readlink -f "$0")")/cmatrix-saver-scene"
 export KITTEN
 pids=()
+launched=0
 
 idle_ms() {
   gdbus call --session --dest org.gnome.Mutter.IdleMonitor \
@@ -103,6 +104,7 @@ pick_scene() {
 
 launch() {
   rm -f "$RUN/key" "$RUN/quit"
+  launched=$(date +%s%3N)
   # notices only count from now: Mutter's idle time also covers you reading
   # the screen, so anything before the saver covered it you may have seen
   date +%s%3N >"$RUN/since"
@@ -214,6 +216,13 @@ saver_key() {
   ((stamp >= now - $1 - 1500))
 }
 
+# 0 for the first 1.5s after launch: input then (a shortcut's keys let go
+# a moment late, a nudge of the mouse) would close the windows before the
+# title has even started, which looks like a crash.
+settling() {
+  (($(date +%s%3N) - launched < 1500))
+}
+
 # Saver windows from any instance (the idle service, or `now`/`test`), so
 # the two never stack a second set of windows on top of the first.
 running() {
@@ -270,7 +279,7 @@ while sleep "$( ((${#pids[@]})) && echo 0.2 || echo "$POLL")"; do
       echo "saver windows closed without input; waiting for activity" >&2
     elif [[ -e $RUN/quit ]]; then
       close_all
-    elif ((idle < prev)) && ! saver_key "$idle"; then
+    elif ((idle < prev)) && ! settling && ! saver_key "$idle"; then
       # a saver key's handler can be a moment behind the input it caused
       sleep 0.15
       idle=$(idle_ms)
