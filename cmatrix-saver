@@ -24,9 +24,9 @@
 # or need input (sources/claude, wired up as a Claude Code hook). Sources
 # with a `watch` collector run in the background alongside this loop.
 #
-# Saver keys (space, 1-9, c, s, n, p, t, r, ?) are handled in the scene, which
-# stamps $RUN/key so the input they cause doesn't close the windows here;
-# esc/q stamp $RUN/quit, which does. Any other key or the mouse closes it.
+# Saver keys (space, 1-9, c, s, n, p, t, m, b, r, ?) are handled in the
+# scene, which stamps $RUN/key so the input they cause doesn't close the
+# windows here; esc/q stamp $RUN/quit, which does. Any other key or the mouse closes it.
 # Each launch picks one scene at random for every monitor: cmatrix, pipes.sh
 # when it's installed, or one from scenes/ (CMATRIX_SAVER_SCENES narrows
 # the pool); s cycles through them.
@@ -34,7 +34,8 @@
 # Run via cmatrix-saver.service (systemd user unit, see README).
 # `cmatrix-saver now [away message]` shows it straight away (bind it to a
 # shortcut; the message replaces the hostname in the status bar) and
-# `cmatrix-saver test` counts down from 5 first; both show it once,
+# `cmatrix-saver blank` goes straight to plain black (no title, scene or
+# bar) and `cmatrix-saver test` counts down from 5 first; all show it once,
 # regardless of idle time, and exit when it closes.
 # GNOME's own blank/lock (Settings > Power > Screen Blank) must be set
 # longer than IDLE_SECS, or the screen blanks before cmatrix shows.
@@ -144,7 +145,10 @@ launch() {
 # Mutter can ignore --position too (seen on GNOME 46 with a fractionally
 # scaled monitor: every window landed on the same monitor, the primary's on
 # top), so once each kitty's window is up, ask for it to be fullscreened on
-# its monitor explicitly (_NET_WM_FULLSCREEN_MONITORS). Args: "pid x y"...
+# its monitor explicitly (_NET_WM_FULLSCREEN_MONITORS). It also gives each
+# window a blank pointer: kitty only hides it after the mouse has been still
+# over a focused window, which a shortcut-launched one may never be (any
+# mouse movement closes the saver anyway). Args: "pid x y"...
 place() {
   python3 - "$@" 2>/dev/null <<'EOF'
 import os, re, subprocess, sys, time
@@ -165,6 +169,8 @@ for arg in sys.argv[1:]:
     if (x, y) in mons:
         want[pid] = mons[x, y]
 
+blank = Gdk.Cursor.new_for_display(disp, Gdk.CursorType.BLANK_CURSOR)
+
 def out(*cmd):
     return subprocess.run(cmd, capture_output=True, text=True).stdout
 
@@ -182,6 +188,7 @@ while want and time.monotonic() < deadline:
         if mon is not None:
             win = GdkX11.X11Window.foreign_new_for_display(disp, int(xid, 16))
             win.fullscreen_on_monitor(mon)
+            win.set_cursor(blank)
             disp.flush()
 EOF
 }
@@ -225,8 +232,9 @@ case $MODE in
     watchers+=($!)
   done < <("$SCENE" sources)
   ;;
-now)
+now | blank)
   running && exit 0
+  [[ $MODE == blank ]] && export CMATRIX_SAVER_BLANK=1
   shift
   [[ -n $* ]] && export CMATRIX_SAVER_AWAY="$*"
   sleep 0.5 # let the shortcut's keys come up before the windows open
@@ -242,13 +250,15 @@ test)
   ;;
 esac
 
+# While the windows are up it polls every 0.2s, so input closes them at
+# once rather than up to $POLL later.
 # dismissed: the windows went away without any input (quit with q, or
 # kitty failed to start). Don't relaunch until the user actually comes
 # back — otherwise a broken launch retries every poll for as long as
 # they're away.
 prev=0
 dismissed=0
-while sleep "$POLL"; do
+while sleep "$( ((${#pids[@]})) && echo 0.2 || echo "$POLL")"; do
   idle=$(idle_ms) || continue
   [[ -z $idle ]] && continue
   ((idle < prev)) && dismissed=0 # idle timer reset: input
@@ -261,9 +271,12 @@ while sleep "$POLL"; do
     elif [[ -e $RUN/quit ]]; then
       close_all
     elif ((idle < prev)) && ! saver_key "$idle"; then
-      close_all
+      # a saver key's handler can be a moment behind the input it caused
+      sleep 0.15
+      idle=$(idle_ms)
+      saver_key "${idle:-0}" || close_all
     fi
-    ((${#pids[@]} == 0)) && [[ $MODE == now || $MODE == test ]] && exit 0
+    ((${#pids[@]} == 0)) && [[ -n $MODE ]] && exit 0
   elif ((!dismissed && idle >= IDLE_SECS * 1000)) && ! idle_inhibited && ! locked && ! running; then
     launch
   fi

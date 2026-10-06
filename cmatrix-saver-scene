@@ -7,8 +7,8 @@
 # ($CMATRIX_SAVER_PRIMARY=1) the title is "<host> \\ idle" and a status bar
 # shows host (or the away message), now playing, idle time, battery, date
 # and clock; other monitors decrypt "HH:MM \\ dd mon" and get no bar. On
-# battery at or below CMATRIX_SAVER_LOW_BATTERY percent (20) it skips all
-# of that and just goes black, to save power.
+# battery at or below CMATRIX_SAVER_LOW_BATTERY percent (20), or with
+# CMATRIX_SAVER_BLANK=1, it skips all of that and just goes black.
 #
 # Keys are tmux bindings that call `cmatrix-saver-scene key <name>`. That
 # stamps $RUN/key first, so cmatrix-saver knows the input was a saver key
@@ -146,31 +146,42 @@ sources() {
 # The top pane on the primary monitor: everything the sources report since
 # the saver came up ($RUN/since, written at launch), urgent first, then newest
 # first, one per row (CMATRIX_SAVER_NOTICES rows at most, 5). With nothing
-# to show, the scene pane stays zoomed over it so it takes no space.
+# to show, or while `m` has them collapsed (@notices_open 0; the status bar
+# then counts them), the scene pane stays zoomed over it so it takes no
+# space. The pane border under it is the dividing line. `m` sends USR1 so
+# the layout changes at once rather than on the next 2s round.
 notices() {
-  local srcs rain since rows cols out n shown=-1
+  local srcs rain since rows cols out='' n=0 open shown='' relayout=0
   mapfile -t srcs < <(sources)
   rain=$(tmux list-panes -F '#{pane_id}' | grep -vx "$TMUX_PANE")
+  tmux set -g @notices_pid $$
+  trap 'relayout=1' USR1
   printf '\e[?25l'
   while :; do
-    since=$(cat "$RUN/since" 2>/dev/null) || since=$(date +%s%3N)
-    read -r rows cols < <(stty size)
-    out=$(for s in "${srcs[@]}"; do
-      "$s" list "$since" 2>/dev/null | sed "s|^|${s##*/}\t|"
-    done | render_notices "$cols" "$((${CMATRIX_SAVER_NOTICES:-5} < 2 ? 2 : ${CMATRIX_SAVER_NOTICES:-5}))")
-    n=0
-    [[ -n $out ]] && n=$(wc -l <<<"$out")
-    if ((n != shown)); then
-      if ((n == 0)); then
+    if ((!relayout)); then
+      since=$(cat "$RUN/since" 2>/dev/null) || since=$(date +%s%3N)
+      read -r rows cols < <(stty size)
+      out=$(for s in "${srcs[@]}"; do
+        "$s" list "$since" 2>/dev/null | sed "s|^|${s##*/}\t|"
+      done | render_notices "$cols" "$((${CMATRIX_SAVER_NOTICES:-5} < 2 ? 2 : ${CMATRIX_SAVER_NOTICES:-5}))")
+      n=0
+      [[ -n $out ]] && n=$(wc -l <<<"$out")
+    fi
+    relayout=0
+    open=$(tmux show -gv @notices_open)
+    if [[ $n:$open != "$shown" ]]; then
+      if ((n == 0 || !open)); then
         tmux if -F '#{window_zoomed_flag}' '' "resize-pane -Z -t $rain"
       else
         tmux if -F '#{window_zoomed_flag}' "resize-pane -Z -t $rain" '' \; \
           resize-pane -t "$TMUX_PANE" -y "$n"
       fi
-      shown=$n
+      tmux set -g @notices_count "$n"
+      shown=$n:$open
     fi
     printf '\e[H%s\e[J' "$out"
-    sleep 2
+    sleep 2 &
+    wait $! || kill $! 2>/dev/null # woken early by `m`
   done
 }
 
@@ -449,6 +460,34 @@ key() {
     ;;
   next) mpris Next ;;
   playpause) mpris PlayPause ;;
+  # only the primary monitor's notices pane sets @notices_pid
+  notices)
+    for srv in "${srvs[@]}"; do
+      cur=$(t show -gv @notices_pid 2>/dev/null)
+      [[ -n $cur ]] || continue
+      t set -g @notices_open $((1 - $(t show -gv @notices_open))) &&
+        kill -USR1 "$cur" 2>/dev/null
+    done
+    ;;
+  blank)
+    # an empty window over the scene's, bar off, scene stopped (unless it's
+    # already paused); `b` again kills the window and puts it all back
+    local on=1
+    (($(tmux show -gv @blank))) && on=0
+    for srv in "${srvs[@]}"; do
+      cur=$(t show -gv @child)
+      if ((on)); then
+        t set -g @blank 1 \; set -g @bar "$(t show -gv status)" \; set -g status off \; \
+          new-window -d -n blank "$CMD black" \; select-window -t :blank
+        # shellcheck disable=SC2046
+        [[ -n $cur ]] && ! (($(t show -gv @paused))) && kill -STOP $(tree "$cur")
+      else
+        t set -g @blank 0 \; set -g status "$(t show -gv @bar)" \; kill-window -t :blank
+        # shellcheck disable=SC2046
+        [[ -n $cur ]] && ! (($(t show -gv @paused))) && kill -CONT $(tree "$cur")
+      fi
+    done
+    ;;
   # the bar and the list belong to the primary monitor, focused or not
   status)
     for srv in "${srvs[@]}"; do
@@ -460,7 +499,7 @@ key() {
     for srv in "${srvs[@]}"; do
       (($(t show -gv @primary))) &&
         t display-popup -c "$(t list-clients -F '#{client_name}' | head -1)" \
-          -E -w 44 -h 16 -b single -S 'fg=#444444' -s 'bg=#000000,fg=#e0e0e0' "$CMD help"
+          -E -w 44 -h 18 -b single -S 'fg=#444444' -s 'bg=#000000,fg=#e0e0e0' "$CMD help"
     done
     ;;
   esac
@@ -476,6 +515,8 @@ help() {
     n 'next track' \
     p 'play / pause music' \
     t 'status bar on / off' \
+    m 'notices: collapse / expand' \
+    b 'blank screen / back' \
     r 'replay the title' \
     '?' 'this list' \
     'esc  q' 'close' \
@@ -494,11 +535,13 @@ notices) notices; exit ;;
 nowplaying) [[ ${CMATRIX_SAVER_NOWPLAYING:-1} == 1 ]] && mpris show; exit ;;
 key) key "$2"; exit ;;
 help) help; exit ;;
+black) printf '\e[?25l\e[2J'; exec sleep infinity ;;
 rain) rain; exit ;;
 replay) decrypt; rain; exit ;;
 esac
 
-if low_battery; then
+# low battery, or `cmatrix-saver blank`
+if low_battery || [[ ${CMATRIX_SAVER_BLANK:-0} == 1 ]]; then
   fade_in &
   printf '\e[?25l\e[2J' # no title, no rain, no cursor: just black
   wait
@@ -513,8 +556,8 @@ mkdir -p "$RUN"
 ln -sfn "$SELF" "$CMD"
 conf=$RUN/tmux-${CMATRIX_SAVER_SLOT:-0}.conf
 {
-  for k in Space:pause c:colour s:scene n:next p:playpause t:status r:replay \
-    '?:help' q:quit Escape:quit {1..9}; do
+  for k in Space:pause c:colour s:scene n:next p:playpause t:status m:notices b:blank \
+    r:replay '?:help' q:quit Escape:quit {1..9}; do
     [[ $k == *:* ]] || k=$k:$k
     printf 'bind -n %s run-shell -b "%s key %s"\n' "${k%%:*}" "$CMD" "${k#*:}"
   done
@@ -527,6 +570,8 @@ if [[ -n ${CMATRIX_SAVER_AWAY:-} ]]; then
   left=${left//#/##}  # tmux formats
   left=${left//%/%%} # strftime: the status bar runs through it
 fi
+# after it, while `m` has notices collapsed, how many there are
+hidden='#{?#{&&:#{@notices_count},#{==:#{@notices_open},0}},#[fg=#cc2222]#{@notices_count} notice#{?#{==:#{@notices_count},1},,s} #[fg=#444444](m)  ,}'
 
 # notices pane above the scene, made zoomed-away until there's something in
 # it; -d keeps the scene pane active, so the keys' send-keys still reach it
@@ -548,20 +593,23 @@ exec tmux -L "cmatrix-saver-${CMATRIX_SAVER_SLOT:-0}" -f "$conf" \
   set -g prefix None \; \
   set -g @scene "${CMATRIX_SAVER_SCENE:-cmatrix}" \; \
   set -g @primary "$PRIMARY" \; \
+  set -g @notices_open 1 \; \
+  set -g @notices_count 0 \; \
+  set -g @blank 0 \; \
   set -g window-style 'bg=#000000' \; \
   set -g popup-style 'bg=#000000' \; \
   set -g status "$( ((PRIMARY)) && echo on || echo off)" \; \
   set -g status-position bottom \; \
   set -g status-interval 1 \; \
   set -g status-style 'bg=#000000,fg=#444444' \; \
-  set -g status-left-length 60 \; \
+  set -g status-left-length 80 \; \
   set -g status-right-length 140 \; \
-  set -g status-left "#[fg=#000000,bg=#cc2222,bold] $left #[default] " \; \
+  set -g status-left "#[fg=#000000,bg=#cc2222,bold] $left #[default] $hidden" \; \
   set -g status-right "#($CMD nowplaying)#[fg=#666666]#($CMD idle)  #($CMD battery)  #[fg=#444444]%a %d %b  #[fg=#cc2222,bold]%H:%M:%S " \; \
   set -g window-status-format '' \; \
   set -g window-status-current-format '' \; \
   set -g pane-border-lines simple \; \
   set -g pane-border-indicators off \; \
-  set -g pane-border-style 'fg=#000000,bg=#000000' \; \
-  set -g pane-active-border-style 'fg=#000000,bg=#000000' \; \
+  set -g pane-border-style 'fg=#333333,bg=#000000' \; \
+  set -g pane-active-border-style 'fg=#333333,bg=#000000' \; \
   new-session -s saver "$CMD rain" "${top[@]}"
