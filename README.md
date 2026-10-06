@@ -26,7 +26,8 @@ control it while it runs; anything else, or moving the mouse, closes it.
 - **Notices:** a strip along the top lists
   [Claude Code](https://claude.com/claude-code) sessions that finished or need
   your input while the saver was up, and your next calendar event today. It
-  takes no space when there's nothing to show. Notices come from small source
+  takes no space when there's nothing to show, and `m` folds it away (the
+  status bar then says how many are waiting). Notices come from small source
   scripts, so you can add your own.
 - It doesn't trigger while something is inhibiting idle (a playing video, a
   presentation) or while the screen is locked.
@@ -92,6 +93,8 @@ While it's showing:
 | `n` | next track |
 | `p` | play / pause music |
 | `t` | status bar on / off |
+| `m` | notices: collapse / expand (collapsed, the status bar counts them) |
+| `b` | blank: plain black on every monitor, scene paused; `b` again brings it back |
 | `r` | replay the title |
 | `?` | list the keys (any key closes the list, not the saver) |
 | `esc`, `q`, mouse, any other key | close it |
@@ -99,7 +102,7 @@ While it's showing:
 `n` and `p` go to whichever media player is playing, or a paused one if none
 is. With more than one monitor, only one window has focus, and you can't move
 focus without closing the saver. So the keys that change the scene (`space`,
-`1`–`9`, `c`, `s`, `r`) apply to every monitor at once, and `t` and `?` always
+`1`–`9`, `c`, `s`, `b`, `r`) apply to every monitor at once, and `t`, `m` and `?` always
 act on the primary monitor, where the status bar is.
 
 ## Usage
@@ -107,6 +110,7 @@ act on the primary monitor, where the status bar is.
 ```sh
 cmatrix-saver now                             # show it straight away
 cmatrix-saver now "back at 3"                 # ...with an away message
+cmatrix-saver blank                           # straight to plain black, any key closes it
 cmatrix-saver test                            # counts down from 5, then shows it once
 systemctl --user restart cmatrix-saver        # pick up edits
 journalctl --user -u cmatrix-saver -n 20      # it didn't show? check here
@@ -252,8 +256,9 @@ Environment=CMATRIX_SAVER_IDLE=600
   through kitty's remote control, plays the decrypt title, then starts the
   scene under a throwaway tmux server. That server draws the status bar and
   holds the key bindings. On the primary monitor, a second pane above the scene
-  shows the notices. It stays zoomed out of the way until there's something to
-  show.
+  shows the notices, with a thin line between it and the scene. It stays
+  zoomed out of the way until there's something to show, or while `m` has it
+  collapsed.
 - **Notices start when the saver does:** Mutter's idle time also counts the
   minutes you spend reading the screen without touching anything. So anything
   that happened before the saver covered the screen, you might already have
