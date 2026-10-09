@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+# cmatrix-saver scene: Conway's Game of Life, two cells to a character
+# (half blocks), on a board that wraps at the edges. Cells are coloured by
+# age (newborn bright, settled darker) and leave a fading trail where they
+# die. Each game starts one of three ways: famous patterns dropped around
+# the board (guns, spaceships, methuselahs), a soup mirrored into four-way
+# symmetry, or plain random soup; now and then under another rule
+# (HighLife, Day & Night, ...). It ends once the board settles into a loop
+# or empties, or after MAX_GAME seconds. Score: generation and population.
+import os, random, sys
+from collections import Counter
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _scene import Scene, main, HI, MID, LOW, DIM, FAINT  # noqa: E402
+
+RULES = [  # name, born, survives; Conway's most of the time
+    ("life", {3}, {2, 3}),
+    ("life", {3}, {2, 3}),
+    ("life", {3}, {2, 3}),
+    ("highlife", {3, 6}, {2, 3}),
+    ("day & night", {3, 6, 7, 8}, {3, 4, 6, 7, 8}),
+    ("morley", {3, 6, 8}, {2, 4, 5}),
+    ("2x2", {3, 6}, {1, 2, 5}),
+]
+
+
+def shape(rows):
+    return [(x, y) for y, row in enumerate(rows) for x, c in enumerate(row) if c == "O"]
+
+
+PATTERNS = {
+    "gosper gun": shape([
+        "........................O...........",
+        "......................O.O...........",
+        "............OO......OO............OO",
+        "...........O...O....OO............OO",
+        "OO........O.....O...OO..............",
+        "OO........O...O.OO....O.O...........",
+        "..........O.....O.......O...........",
+        "...........O...O....................",
+        "............OO......................",
+    ]),
+    "r-pentomino": shape([".OO", "OO.", ".O."]),
+    "acorn": shape([".O.....", "...O...", "OO..OOO"]),
+    "diehard": shape(["......O.", "OO......", ".O...OOO"]),
+    "lwss": shape([".O..O", "O....", "O...O", "OOOO."]),
+    "hwss": shape(["...OO..", ".O....O", "O......", "O.....O", "OOOOOO."]),
+    "pulsar": shape([
+        "..OOO...OOO..", ".............", "O....O.O....O", "O....O.O....O",
+        "O....O.O....O", "..OOO...OOO..", ".............", "..OOO...OOO..",
+        "O....O.O....O", "O....O.O....O", "O....O.O....O", ".............",
+        "..OOO...OOO..",
+    ]),
+    "pentadecathlon": shape(["..O....O..", "OO.OOOO.OO", "..O....O.."]),
+    "glider": shape([".O.", "..O", "OOO"]),
+    "b-heptomino": shape(["O.OO", "OOO.", ".O.."]),
+}
+
+
+class Life(Scene):
+    DELAYS = [0.4, 0.28, 0.2, 0.14, 0.1, 0.07, 0.05, 0.03, 0.015]
+
+    def new_game(self):
+        self.gw, self.gh = self.w, (self.h - 1) * 2  # the top row is the score's
+        self.rule = random.choice(RULES)
+        self.age = {}  # live cell -> generations alive
+        self.ghost = {}  # recently dead cell -> generations since
+        self.gen = 0
+        self.seen = {}  # state hash -> generation, to spot a loop
+        self.looping = None
+        seed = random.choice(["patterns", "patterns", "symmetric", "soup"])
+        getattr(self, "seed_" + seed)()
+        self.how = seed if seed != "patterns" else self.how
+        self.draw()
+
+    def seed_soup(self):
+        for y in range(self.gh):
+            for x in range(self.gw):
+                if random.random() < 0.3:
+                    self.age[(x, y)] = 1
+
+    def seed_symmetric(self):
+        # a soup in the middle, mirrored both ways: grows into a kaleidoscope
+        sw, sh = min(self.gw // 2, 24), min(self.gh // 2, 16)
+        cx, cy = self.gw // 2, self.gh // 2
+        for y in range(sh):
+            for x in range(sw):
+                if random.random() < 0.45:
+                    for px, py in ((cx + x, cy + y), (cx - 1 - x, cy + y),
+                                   (cx + x, cy - 1 - y), (cx - 1 - x, cy - 1 - y)):
+                        self.age[(px % self.gw, py % self.gh)] = 1
+
+    def seed_patterns(self):
+        names = list(PATTERNS)
+        star = random.choice(["gosper gun", "acorn", "r-pentomino", "diehard",
+                              "b-heptomino", "pulsar"])
+        self.how = star
+        n = max(3, self.gw * self.gh // 1500)
+        for i in range(n):
+            name = star if i < 2 else random.choice(names)
+            cells = PATTERNS[name]
+            if random.random() < 0.5:
+                cells = [(-x, y) for x, y in cells]
+            if random.random() < 0.5:
+                cells = [(x, -y) for x, y in cells]
+            ox, oy = random.randrange(self.gw), random.randrange(self.gh)
+            for x, y in cells:
+                self.age[((ox + x) % self.gw, (oy + y) % self.gh)] = 1
+
+    def step(self):
+        _, born, survives = self.rule
+        counts = Counter()
+        gw, gh = self.gw, self.gh
+        for x, y in self.age:
+            xl, xr, yu, yd = (x - 1) % gw, (x + 1) % gw, (y - 1) % gh, (y + 1) % gh
+            counts.update(((xl, yu), (x, yu), (xr, yu), (xl, y), (xr, y),
+                           (xl, yd), (x, yd), (xr, yd)))
+        age = {}
+        for p, n in counts.items():
+            if p in self.age:
+                if n in survives:
+                    age[p] = self.age[p] + 1
+            elif n in born:
+                age[p] = 1
+        # survivors with no neighbours at all (only possible under rules
+        # where 0 survives; none here) aren't counted: fine
+        ghost = {p: g + 1 for p, g in self.ghost.items() if g < 3 and p not in age}
+        for p in self.age:
+            if p not in age:
+                ghost[p] = 1
+        self.age, self.ghost = age, ghost
+        self.gen += 1
+        self.draw()
+        if not age:
+            return False if self.gen > 1 else True
+        key = hash(frozenset(age))
+        if self.looping is None and key in self.seen:
+            self.looping = self.gen
+        self.seen[key] = self.gen
+        if len(self.seen) > 200:
+            self.seen = {k: g for k, g in self.seen.items() if g > self.gen - 100}
+        # once it loops, let it show the loop for a few seconds
+        return self.looping is None or self.gen - self.looping < 40
+
+    def tone(self, p):
+        a = self.age.get(p)
+        if a:
+            return HI if a == 1 else MID if a < 6 else LOW
+        g = self.ghost.get(p)
+        if g:
+            return DIM if g == 1 else FAINT
+        return None
+
+    def draw(self):
+        for ty in range(1, self.h):
+            gy = (ty - 1) * 2
+            for x in range(self.w):
+                top, bot = self.tone((x, gy)), self.tone((x, gy + 1))
+                if top is None and bot is None:
+                    self.put(x, ty, " ")
+                elif top == bot:
+                    self.put(x, ty, "█", top)
+                elif bot is None:
+                    self.put(x, ty, "▀", top)
+                elif top is None:
+                    self.put(x, ty, "▄", bot)
+                else:
+                    self.put(x, ty, "▀", top, bot)
+        self.hud = "%s · %s · gen %d · pop %d" % (self.rule[0], self.how, self.gen, len(self.age))
+
+    def on_resize(self):
+        # keep what fits (the notices strip moves the top edge down or up)
+        old = self.age
+        self.gw, self.gh = self.w, (self.h - 1) * 2
+        self.age = {p: a for p, a in old.items() if p[0] < self.gw and p[1] < self.gh}
+        self.ghost = {}
+        self.draw()
+
+
+if __name__ == "__main__":
+    main(Life)

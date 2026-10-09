@@ -9,9 +9,10 @@ After 5 minutes without input, or straight away from a keyboard shortcut, a
 fullscreen [kitty](https://sw.kovidgoyal.net/kitty/) window opens on every
 monitor. The desktop fades to black, a title decrypts out of scrambled glyphs,
 and then a scene runs: `cmatrix` in your terminal's colours,
-[pipes.sh](https://github.com/pipeseroni/pipes.sh) if it's installed, or a
-snake that steers itself around the screen eating `%`s. A handful of keys
-control it while it runs; anything else, or moving the mouse, closes it.
+[pipes.sh](https://github.com/pipeseroni/pipes.sh) if it's installed, or one
+of ten of its own, from a snake that steers itself to Tetris that plays
+itself (see [Scenes](#scenes)). A handful of keys control it while it runs;
+anything else, or moving the mouse, closes it.
 
 - **Primary monitor:** decrypts `<hostname> \\ idle`, then shows a status bar
   with the hostname, what's playing, idle time, battery (green while plugged
@@ -45,7 +46,8 @@ control it while it runs; anything else, or moving the mouse, closes it.
 - Optional: `python3-dateutil` for repeating events in the
   [calendar](#calendar) notices.
 - Optional: `pipes.sh`. Each run picks a scene at random from cmatrix, pipes
-  (when it's installed) and snake.
+  (when it's installed) and the ones in [Scenes](#scenes), which need only
+  Python 3.
 
 ```sh
 sudo apt install cmatrix tmux python3-gi x11-utils
@@ -88,8 +90,8 @@ While it's showing:
 |---|---|
 | `space` | pause / resume |
 | `1`–`9` | speed, `9` fastest (pipes: 20–100 fps) |
-| `c` | colour: cycles cmatrix's colours, toggles pipes' colour, swaps the snake between red and grey |
-| `s` | next scene: cmatrix → pipes → snake → … |
+| `c` | colour: cycles cmatrix's colours, toggles pipes' colour, cycles the other scenes between red, grey and green (snake: red and grey) |
+| `s` | next scene: cmatrix → pipes → ant → boids → … → tetris → … |
 | `n` | next track |
 | `p` | play / pause music |
 | `t` | status bar on / off |
@@ -196,14 +198,40 @@ It reads the calendars ticked in GNOME Calendar's list. To narrow that, set
 `CMATRIX_SAVER_SOURCES`. Repeating events need `python3-dateutil`
 (`sudo apt install python3-dateutil` if it's missing).
 
+## Scenes
+
+Besides cmatrix and pipes, these come with it. Each game ends by itself
+(or after a few minutes at most), dissolves, and a new one starts. Where
+there's a score, it's in the top right corner, with the best kept across
+runs in `~/.local/state/cmatrix-saver/best.json`.
+
+| scene | what it is | score |
+|---|---|---|
+| `ant` | Langton's ant and other turmites: ten thousand steps of mess, then a highway out of nowhere; speeds up until an ant walks off the screen | rule, steps |
+| `boids` | a flock of arrows, and a hunter that grows hungrier until it has caught them all | caught |
+| `eca` | elementary cellular automata (rule 30, 110, 90...) scrolling up the screen, a new rule every minute and a half | rule, generation |
+| `life` | Game of Life from famous patterns or a symmetric soup, now and then under another rule; cells shaded by age; ends when it loops | generation, population |
+| `maze` | a maze carves itself (backtracker, Prim, Kruskal or Wilson), then A* searches it and draws the way through | explored, path |
+| `plasma` | plasma, or a lava lamp, in the scheme's shades | |
+| `pong` | two players that play themselves; every return is faster, until one can't reach it; first to 5 | rally, best rally |
+| `snake` | a snake that steers itself to the nearest `%`, never trapping itself, until it does | eaten, best |
+| `sort` | nine sorting algorithms as bars, each paced to about half a minute | comparisons, writes |
+| `tetris` | Tetris that plays itself, one move a tick against gravity that speeds up every 10 lines, until it tops out | score, lines, level, best |
+
 ## Your own scenes and notices
 
 A **scene** is any executable in `~/.config/cmatrix-saver/scenes/`. It draws to
 its terminal until it's killed. The saver passes it `1`–`9` (speed) and `c`
 (colour) as plain keypresses on stdin, and pauses it by stopping its process
 and everything under it. If it exits on its own, it's started again a second
-later. It joins the random pick and the `s` cycle under its file name. See
-`scenes/snake` for an example.
+later. It joins the random pick and the `s` cycle under its file name. A
+name starting with `_` isn't a scene. In Python, `scenes/_scene.py` does the
+work the scenes here share (the keys, resizes, drawing only what changed,
+the dissolve between games, the score): subclass its `Scene`, fill in
+`new_game()` and `step()`, and see `scenes/eca` for a short example. A scene
+imports it from its own directory: `install.sh` copies it there, but with
+`--link` it stays in the clone, so link it into `~/.config/cmatrix-saver/scenes/`
+too.
 
 A **notice source** is any executable in `~/.config/cmatrix-saver/sources/`.
 The saver runs `<source> list <since>` every 2 seconds, where `<since>` is when

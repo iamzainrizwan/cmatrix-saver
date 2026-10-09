@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+# cmatrix-saver scene: Langton's ant and its many-coloured cousins
+# (turmites). Each cell has a colour; the ant turns by the rule's letter for
+# it (R right, L left), steps the cell on to the next colour and moves on.
+# The classic RL makes about ten thousand steps of mess and then, out of
+# nowhere, builds a straight "highway" off to the edge; other rules grow
+# symmetric blobs, fill squares or build triangles. It starts slow and
+# speeds up as it goes, and the game ends when an ant walks off the screen.
+# Two cells to a character (half blocks). Score: the rule, ants, steps.
+import os, random, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _scene import Scene, main, HI, MID, LOW, DIM, ACCENT  # noqa: E402
+
+RULES = [  # rule, how many ants
+    ("RL", 1), ("RL", 1), ("RL", 2), ("RL", 3),
+    ("RLR", 1),  # chaotic growth
+    ("LLRR", 1),  # symmetric
+    ("LRRRRRLLR", 1),  # fills a square
+    ("LLRRRLRLRLLR", 1),  # a winding highway
+    ("RRLLLRLLLRRR", 1),  # a growing triangle
+    ("RRLL", 2),
+]
+TONES = [None, MID, HI, LOW, DIM]
+DIRS = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # up, right, down, left
+
+
+class Ant(Scene):
+    MAX_GAME = 300
+    HOLD = 2.0
+
+    def new_game(self):
+        self.rule, n = random.choice(RULES)
+        self.gw, self.gh = self.w, (self.h - 1) * 2  # the top row is the score's
+        self.grid = {}
+        cx, cy = self.gw // 2, self.gh // 2
+        self.ants = []
+        for i in range(n):
+            # several ants start a little apart, facing different ways
+            dx, dy = (0, 0) if i == 0 else (random.randint(-6, 6), random.randint(-6, 6))
+            self.ants.append([cx + dx, cy + dy, random.randrange(4)])
+        self.steps = 0
+        self.rate = 2.0  # steps a frame, growing
+        self.dirty = set()
+        for a in self.ants:
+            self.dirty.add((a[0], a[1]))
+
+    def tone(self, x, y):
+        s = self.grid.get((x, y), 0)
+        if not s:
+            return None
+        return TONES[1 + (s - 1) % (len(TONES) - 1)]
+
+    def step(self):
+        n = len(self.rule)
+        for _ in range(int(self.rate)):
+            for a in self.ants:
+                x, y, d = a
+                s = self.grid.get((x, y), 0)
+                d = (d + (1 if self.rule[s] == "R" else -1)) % 4
+                self.grid[(x, y)] = (s + 1) % n
+                self.dirty.add((x, y))
+                x, y = x + DIRS[d][0], y + DIRS[d][1]
+                a[:] = [x, y, d]
+                if not (0 <= x < self.gw and 0 <= y < self.gh):
+                    self.draw()
+                    return False
+            self.steps += 1
+        self.rate = min(self.rate * 1.0035, 600)
+        self.draw()
+        return True
+
+    def draw(self):
+        ants = {(a[0], a[1]) for a in self.ants}
+        for x, y in self.dirty | ants | self.last_ants():
+            gy = y - y % 2
+            top, bot = (x, gy), (x, gy + 1)
+            t = ACCENT if top in ants else self.tone(*top)
+            b = ACCENT if bot in ants else self.tone(*bot)
+            ty = gy // 2 + 1
+            if t is None and b is None:
+                self.put(x, ty, " ")
+            elif t == b:
+                self.put(x, ty, "█", t)
+            elif b is None:
+                self.put(x, ty, "▀", t)
+            elif t is None:
+                self.put(x, ty, "▄", b)
+            else:
+                self.put(x, ty, "▀", t, b)
+        self.dirty = set()
+        self.shown_ants = ants
+        self.hud = "%s · %d ant%s · step %d" % (
+            self.rule, len(self.ants), "" if len(self.ants) == 1 else "s", self.steps)
+
+    def last_ants(self):
+        return getattr(self, "shown_ants", set())
+
+    def on_resize(self):
+        # the cells stay where they are; redraw whatever still fits
+        self.gw, self.gh = self.w, (self.h - 1) * 2
+        self.dirty = {p for p in self.grid if p[0] < self.gw and p[1] < self.gh}
+        self.shown_ants = set()
+        if any(not (0 <= a[0] < self.gw and 0 <= a[1] < self.gh) for a in self.ants):
+            self.new_game()
+        self.draw()
+
+
+if __name__ == "__main__":
+    main(Ant)

@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+# cmatrix-saver scene: Pong, two players that play themselves. Every return
+# sends the ball back faster; a player works out where it will arrive (off
+# the walls and all) but moves at a fixed speed and misjudges more the
+# faster it comes, so each rally builds until one of them can't get there.
+# First to WIN points takes the match: the last frame holds, dissolves, and
+# a new match starts. Score: the points in big digits, and in the corner the
+# rally, the longest this match and the best kept across runs.
+import math, os, random, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _scene import Scene, main, HI, MID, DIM, FAINT, ACCENT  # noqa: E402
+
+WIN = 5
+FASTER = 1.07  # per return
+DIGITS = {  # 3x5
+    "0": ["███", "█ █", "█ █", "█ █", "███"], "1": [" █ ", "██ ", " █ ", " █ ", "███"],
+    "2": ["███", "  █", "███", "█  ", "███"], "3": ["███", "  █", "███", "  █", "███"],
+    "4": ["█ █", "█ █", "███", "  █", "  █"], "5": ["███", "█  ", "███", "  █", "███"],
+    "6": ["███", "█  ", "███", "█ █", "███"], "7": ["███", "  █", "  █", "  █", "  █"],
+    "8": ["███", "█ █", "███", "█ █", "███"], "9": ["███", "█ █", "███", "  █", "███"],
+}
+
+
+class Pong(Scene):
+    DELAYS = [0.08, 0.06, 0.05, 0.042, 0.036, 0.03, 0.024, 0.018, 0.012]
+    MAX_GAME = 600
+    HOLD = 3.0
+
+    def new_game(self):
+        self.points = [0, 0]
+        self.rally = self.longest = 0
+        self.best_rally = self.best.get("pong")
+        self.court()
+        self.pad = [self.ph / 2, self.ph / 2]  # paddle centres, in pixels
+        self.aim = [self.ph / 2, self.ph / 2]
+        self.trail = []
+        self.pause = 0
+        self.serve(random.choice([-1, 1]))
+        self.draw()
+
+    def court(self):
+        # x in columns; y in pixels, two to a row below the score row
+        self.pw, self.ph = self.w, (self.h - 1) * 2
+        self.size = max(4, self.ph // 7)
+        self.reach = max(0.5, self.ph / 70)  # paddle speed, pixels a tick
+        self.lx, self.rx = 2, self.w - 3
+
+    def serve(self, way):
+        self.bx, self.by = self.pw / 2, random.uniform(0.3, 0.7) * self.ph
+        speed = max(0.8, self.w / 130)
+        a = random.uniform(-0.5, 0.5)
+        self.vx, self.vy = way * speed * math.cos(a), speed * math.sin(a) * 1.4
+        self.rally = 0
+        self.plan()
+
+    def plan(self):
+        """The player the ball is heading for works out where to be."""
+        side = 0 if self.vx < 0 else 1
+        x = self.lx + 1 if side == 0 else self.rx
+        t = (x - self.bx) / self.vx
+        y = self.by + self.vy * t
+        span = self.ph - 1
+        y = abs(y) % (2 * span)  # off the walls: fold into the court
+        y = 2 * span - y if y > span else y
+        # misjudges more the faster it's going
+        miss = random.gauss(0, 0.6 + (abs(self.vx) - 1) * 2.2)
+        self.aim[side] = y + miss
+        self.aim[1 - side] = self.ph / 2  # the other drifts back to the middle
+
+    def step(self):
+        if self.pause:
+            self.pause -= 1
+            if not self.pause:
+                if max(self.points) >= WIN:
+                    return False
+                self.serve(1 if self.loser else -1)
+            self.draw()
+            return True
+        for side in (0, 1):
+            d = self.aim[side] - self.pad[side]
+            self.pad[side] += max(-self.reach, min(self.reach, d))
+        self.trail.insert(0, (self.bx, self.by))
+        del self.trail[4:]
+        self.bx += self.vx
+        self.by += self.vy
+        if self.by < 0 or self.by > self.ph - 1:
+            self.vy = -self.vy
+            self.by = -self.by if self.by < 0 else 2 * (self.ph - 1) - self.by
+        for side, px in ((0, self.lx + 1), (1, self.rx)):
+            heading = self.vx < 0 if side == 0 else self.vx > 0
+            crossed = self.bx <= px if side == 0 else self.bx >= px
+            if not (heading and crossed):
+                continue
+            off = (self.by - self.pad[side]) / (self.size / 2 + 1)
+            if abs(off) <= 1:
+                # where it hits the paddle sets the angle back
+                speed = math.hypot(self.vx, self.vy) * FASTER
+                a = off * 0.9
+                self.vx = (1 if side == 0 else -1) * speed * math.cos(a)
+                self.vy = speed * math.sin(a) * 1.4
+                self.bx = px
+                self.rally += 1
+                self.longest = max(self.longest, self.rally)
+                self.plan()
+            else:
+                self.points[1 - side] += 1
+                self.loser = side
+                self.best_rally = self.best.offer("pong", self.longest)
+                self.pause = int(1.2 / self.DELAYS[5])
+        self.draw()
+        return True
+
+    def pixel(self, x, y, tone):
+        x, y = int(x), int(y)
+        if not (0 <= x < self.w and 0 <= y < self.ph):
+            return
+        ty = y // 2 + 1
+        ch, fg, bg = self.cells[ty][x]
+        top = y % 2 == 0
+        # merge with whatever half is already lit in that character
+        other = None
+        if ch == "█":
+            other = fg
+        elif ch == "▀" and not top:
+            other = fg
+        elif ch == "▄" and top:
+            other = fg
+        if other is None or other == tone:
+            self.put(x, ty, "▀" if top else "▄", tone)
+            if other == tone:
+                self.put(x, ty, "█", tone)
+        else:
+            self.put(x, ty, "▀", tone if top else other, other if top else tone)
+
+    def draw(self):
+        for y in range(1, self.h):
+            self.cells[y][:] = [(" ", None, None)] * self.w
+        mid = self.w // 2
+        for y in range(1, self.h, 2):
+            self.put(mid, y, "╎", FAINT)
+        for side, x0 in ((0, mid - 12), (1, mid + 4)):
+            for i, d in enumerate(str(self.points[side])):
+                for r, line in enumerate(DIGITS[d]):
+                    for c, ch in enumerate(line):
+                        if ch != " ":
+                            self.put(x0 + i * 8 + c * 2, 2 + r, "█", DIM)
+                            self.put(x0 + i * 8 + c * 2 + 1, 2 + r, "█", DIM)
+        for side, x in ((0, self.lx), (1, self.rx)):
+            c = self.pad[side]
+            for y in range(int(c - self.size / 2), int(c + self.size / 2) + 1):
+                self.pixel(x, y, MID)
+        if not self.pause or max(self.points) >= WIN:
+            for i, (tx, ty) in enumerate(self.trail[1:]):
+                self.pixel(tx, ty, DIM if i < 1 else FAINT)
+                self.pixel(tx + 1, ty, DIM if i < 1 else FAINT)
+            tone = ACCENT if self.pause else HI
+            self.pixel(self.bx, self.by, tone)
+            self.pixel(self.bx + 1, self.by, tone)
+        self.hud = "rally %d · longest %d · best %d" % (
+            self.rally, self.longest, max(self.longest, self.best_rally))
+
+    def on_resize(self):
+        old = self.ph
+        self.court()
+        k = self.ph / old if old else 1
+        self.pad = [p * k for p in self.pad]
+        self.aim = [a * k for a in self.aim]
+        self.by *= k
+        self.bx = min(self.bx, self.w - 1)
+        self.trail = []
+        self.draw()
+
+
+if __name__ == "__main__":
+    main(Pong)

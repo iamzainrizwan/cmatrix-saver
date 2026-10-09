@@ -65,6 +65,7 @@ uninstall() {
       echo "kept $CONF/$f (changed)"
     fi
   done
+  rm -rf "$CONF/scenes/__pycache__"
   rmdir "$CONF/scenes" "$CONF/sources" "$CONF" 2>/dev/null || true
   echo "uninstalled"
 }

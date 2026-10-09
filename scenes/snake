@@ -4,8 +4,18 @@
 # it a way back to its own tail; if there's none it wanders wherever has the
 # most room. When it finally boxes itself in, it dissolves and a new one
 # starts. Keys (sent by the saver): 1-9 speed (9 fastest), c colour.
+#
+# Once it stops growing (MAX_FILL) it could follow its own tail forever,
+# and on a big screen even a game that does end takes ten minutes or more,
+# so a game also ends after MAX_GAME seconds, after LINGER steps at full
+# length, or after going a screenful of steps without eating. The top row
+# is the score: % eaten, and the best kept by _scene.Best.
 import os, random, select, signal, sys, termios, tty
 from collections import deque
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _scene import Best  # noqa: E402
 
 SPEEDS = [0.20, 0.15, 0.11, 0.085, 0.065, 0.05, 0.038, 0.028, 0.018]
 # head, body, then the tail fading out; and the % it eats
@@ -17,6 +27,8 @@ FOOD = ["#e0e0e0", "#cc2222"]
 GROW = 3
 MAX_FILL = 0.3  # stops growing past this share of the screen
 DIRS = [(1, 0), (0, 1), (-1, 0), (0, -1)]
+MAX_GAME = 300  # seconds of play
+LINGER = 400  # steps at full length
 
 out = sys.stdout
 
@@ -30,6 +42,7 @@ class Snake:
         self.delay = SPEEDS[5]
         self.scheme = 0
         self.resized = False
+        self.best = Best()
         self.reset_grid()
 
     # each cell is two columns wide, so it moves as fast across as down.
@@ -39,7 +52,9 @@ class Snake:
     def reset_grid(self):
         cols, rows = os.get_terminal_size()
         old_h = getattr(self, "h", None)
-        self.w, self.h = max(cols // 2, 4), max(rows, 4)
+        # the top row is the score's
+        self.w, self.h = max(cols // 2, 4), max(rows - 1, 4)
+        self.cols = cols
         out.write("\033[2J")
         body = getattr(self, "body", None)
         if body and old_h:
@@ -62,6 +77,10 @@ class Snake:
         self.dir = (1, 0)
         self.grow = GROW
         self.food = set()
+        self.eaten = 0
+        self.played = 0.0
+        self.hungry = 0  # steps since it last ate
+        self.full = 0  # steps at full length
         out.write("\033[2J")
         self.top_up_food()
         self.redraw()
@@ -76,7 +95,13 @@ class Snake:
                 self.draw_food(p)
 
     def put(self, p, text):
-        out.write("\033[%d;%dH%s" % (p[1] + 1, p[0] * 2 + 1, text))
+        out.write("\033[%d;%dH%s" % (p[1] + 2, p[0] * 2 + 1, text))
+
+    def draw_score(self):
+        text = " %% %d  best %d " % (self.eaten, max(self.eaten, self.best.get("snake")))
+        if len(text) < self.cols:
+            out.write("\033[1;%dH\033[38;2;102;102;102m%s\033[0m"
+                      % (self.cols - len(text), text))
 
     def draw_food(self, p):
         self.put(p, "\033[1m" + rgb(FOOD[self.scheme]) + "% \033[0m")
@@ -93,6 +118,7 @@ class Snake:
         self.put(self.body[i], rgb(self.colour_of(i)) + "██\033[0m")
 
     def redraw(self):
+        self.draw_score()
         for p in self.food:
             self.draw_food(p)
         for i in range(len(self.body)):
@@ -167,15 +193,23 @@ class Snake:
 
     def step(self):
         nxt = self.choose()
-        if nxt is None:
+        self.played += self.delay
+        if nxt is None or self.played > MAX_GAME or self.full > LINGER \
+                or self.hungry > self.w * self.h:
             self.dissolve()
             return
         self.dir = (nxt[0] - self.body[0][0], nxt[1] - self.body[0][1])
         ate = nxt in self.food
+        self.hungry += 1
         if ate:
             self.food.discard(nxt)
+            self.eaten += 1
+            self.hungry = 0
+            self.draw_score()
             if len(self.body) < self.w * self.h * MAX_FILL:
                 self.grow += GROW
+        if not self.grow and len(self.body) >= self.w * self.h * MAX_FILL:
+            self.full += 1
         if self.grow:
             self.grow -= 1
         else:
@@ -192,6 +226,7 @@ class Snake:
                 self.draw_seg(i)
 
     def dissolve(self):
+        self.best.offer("snake", self.eaten)
         dim = SCHEMES[self.scheme][3]
         for p in self.body:
             self.put(p, rgb(dim) + "░░\033[0m")
