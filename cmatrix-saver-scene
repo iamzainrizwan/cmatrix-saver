@@ -103,12 +103,14 @@ EOF
 # next to this script and ~/.config/cmatrix-saver/scenes/ (same name
 # overrides a built-in). A scene just draws to its terminal until it's
 # killed; the saver sends it 1-9 (speed) and c (colour) as plain keys.
+# Names starting with _ aren't scenes (scenes/_scene.py is a module the
+# Python ones share).
 # CMATRIX_SAVER_SCENES narrows the set.
 scene_files() {
   local d f
   for d in "$(dirname "$SELF")/scenes" "${XDG_CONFIG_HOME:-$HOME/.config}/cmatrix-saver/scenes"; do
     for f in "$d"/*; do
-      [[ -f $f && -x $f ]] && echo "$f"
+      [[ -f $f && -x $f && ${f##*/} != _* ]] && echo "$f"
     done
   done
 }

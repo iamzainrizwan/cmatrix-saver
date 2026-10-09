@@ -14,7 +14,7 @@ jobs:
       - name: python syntax
         # the scenes and sources have no .py extension, so compile them by hand
         run: |
-          python3 - scenes/snake sources/* <<'EOF'
+          python3 - scenes/* sources/* <<'EOF'
           import sys
           for f in sys.argv[1:]:
               compile(open(f).read(), f, "exec")
