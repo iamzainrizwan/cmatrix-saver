@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+# cmatrix-saver scene: sorting algorithms at work, one bar a column, shaded
+# by value so a sorted screen is a smooth ramp. The bars being compared or
+# written flash; each sort is paced to take about half a minute whatever
+# its speed, so you see how differently they go about it rather than how
+# long they take. Then a sweep checks the result, it dissolves, and the
+# next algorithm takes a fresh input (random, reversed, nearly sorted, or
+# few distinct values). Score: the algorithm, input, comparisons, writes.
+import os, random, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _scene import Scene, main, HI, ACCENT  # noqa: E402
+
+SECONDS = 30  # each sort, at speed 6
+PARTS = " ▁▂▃▄▅▆▇█"
+
+
+# Each sort works on a list and yields what it does: ("cmp", i, j) for a
+# comparison, ("set", i, v) for a write, ("read", i, i) for a look that
+# isn't a comparison (radix sort's). Swaps are two sets.
+def swap(a, i, j):
+    a[i], a[j] = a[j], a[i]
+    yield ("set", i, a[i])
+    yield ("set", j, a[j])
+
+
+def quicksort(a, lo=0, hi=None):
+    hi = len(a) - 1 if hi is None else hi
+    while lo < hi:
+        m = (lo + hi) // 2
+        yield from swap(a, m, hi)  # middle as pivot: fine on sorted input
+        p, i = a[hi], lo
+        for j in range(lo, hi):
+            yield ("cmp", j, hi)
+            if a[j] < p:
+                yield from swap(a, i, j)
+                i += 1
+        yield from swap(a, i, hi)
+        # recurse into the smaller side, loop on the larger
+        if i - lo < hi - i:
+            yield from quicksort(a, lo, i - 1)
+            lo = i + 1
+        else:
+            yield from quicksort(a, i + 1, hi)
+            hi = i - 1
+
+
+def merge_sort(a):
+    n, width = len(a), 1
+    while width < n:
+        for lo in range(0, n, 2 * width):
+            mid, hi = min(lo + width, n), min(lo + 2 * width, n)
+            left, right = a[lo:mid], a[mid:hi]
+            i = j = 0
+            for k in range(lo, hi):
+                if i < len(left) and j < len(right):
+                    yield ("cmp", lo + i, mid + j)
+                if j >= len(right) or i < len(left) and left[i] <= right[j]:
+                    a[k] = left[i]
+                    i += 1
+                else:
+                    a[k] = right[j]
+                    j += 1
+                yield ("set", k, a[k])
+        width *= 2
+
+
+def heapsort(a):
+    n = len(a)
+
+    def sift(i, end):
+        while 2 * i + 1 < end:
+            c = 2 * i + 1
+            if c + 1 < end:
+                yield ("cmp", c, c + 1)
+                if a[c + 1] > a[c]:
+                    c += 1
+            yield ("cmp", i, c)
+            if a[i] >= a[c]:
+                return
+            yield from swap(a, i, c)
+            i = c
+
+    for i in range(n // 2 - 1, -1, -1):
+        yield from sift(i, n)
+    for end in range(n - 1, 0, -1):
+        yield from swap(a, 0, end)
+        yield from sift(0, end)
+
+
+def shellsort(a):
+    gaps, g = [], 1
+    while g < len(a):
+        gaps.insert(0, g)
+        g = g * 3 + 1
+    for g in gaps:
+        for i in range(g, len(a)):
+            j = i
+            while j >= g:
+                yield ("cmp", j - g, j)
+                if a[j - g] <= a[j]:
+                    break
+                yield from swap(a, j - g, j)
+                j -= g
+
+
+def radix_sort(a):
+    # least significant digit first, base 4: each pass a counting sort
+    top, shift = max(a), 0
+    while top >> shift:
+        buckets = [[] for _ in range(4)]
+        for i, v in enumerate(a):
+            yield ("read", i, i)
+            buckets[(v >> shift) & 3].append(v)
+        k = 0
+        for b in buckets:
+            for v in b:
+                a[k] = v
+                yield ("set", k, v)
+                k += 1
+        shift += 2
+
+
+def insertion_sort(a):
+    for i in range(1, len(a)):
+        j = i
+        while j > 0:
+            yield ("cmp", j - 1, j)
+            if a[j - 1] <= a[j]:
+                break
+            yield from swap(a, j - 1, j)
+            j -= 1
+
+
+def cocktail_shaker(a):
+    lo, hi = 0, len(a) - 1
+    while lo < hi:
+        last = lo
+        for i in range(lo, hi):
+            yield ("cmp", i, i + 1)
+            if a[i] > a[i + 1]:
+                yield from swap(a, i, i + 1)
+                last = i
+        hi = last
+        for i in range(hi, lo, -1):
+            yield ("cmp", i - 1, i)
+            if a[i - 1] > a[i]:
+                yield from swap(a, i - 1, i)
+                last = i
+        lo = last
+
+
+def comb_sort(a):
+    gap, done = len(a), False
+    while not done:
+        gap = max(1, int(gap / 1.3))
+        done = gap == 1
+        for i in range(len(a) - gap):
+            yield ("cmp", i, i + gap)
+            if a[i] > a[i + gap]:
+                yield from swap(a, i, i + gap)
+                done = False
+
+
+def selection_sort(a):
+    for i in range(len(a) - 1):
+        m = i
+        for j in range(i + 1, len(a)):
+            yield ("cmp", m, j)
+            if a[j] < a[m]:
+                m = j
+        if m != i:
+            yield from swap(a, i, m)
+
+
+SORTS = {
+    "quicksort": quicksort, "merge sort": merge_sort, "heapsort": heapsort,
+    "shellsort": shellsort, "radix sort": radix_sort,
+    "insertion sort": insertion_sort, "cocktail shaker": cocktail_shaker,
+    "comb sort": comb_sort, "selection sort": selection_sort,
+}
+
+
+class Sort(Scene):
+    MAX_GAME = 120
+    HOLD = 1.5
+
+    def __init__(self):
+        self.queue = []
+        super().__init__()
+
+    def new_game(self):
+        if not self.queue:
+            self.queue = list(SORTS)
+            random.shuffle(self.queue)
+        self.algo = self.queue.pop()
+        n = self.w
+        self.input = random.choice(["random", "random", "reversed", "nearly sorted", "few unique"])
+        a = list(range(1, n + 1))
+        if self.input == "reversed":
+            a.reverse()
+        elif self.input == "nearly sorted":
+            for _ in range(max(2, n // 15)):
+                i = random.randrange(n)
+                j = min(n - 1, max(0, i + random.randint(-8, 8)))
+                a[i], a[j] = a[j], a[i]
+        else:
+            if self.input == "few unique":
+                a = [(v * 6 // (n + 1) + 1) * n // 6 for v in a]
+            random.shuffle(a)
+        self.a, self.top = a[:], max(a)
+        self.events = list(SORTS[self.algo](a[:]))
+        self.at = 0
+        frames = SECONDS / self.DELAYS[5]
+        self.rate = max(1, round(len(self.events) / frames))
+        self.cmps = self.writes = 0
+        self.lit = {}
+        self.sweep = None
+        self.draw()
+
+    def step(self):
+        self.lit = {}
+        if self.sweep is not None:
+            self.sweep += max(1, self.w // 40)
+            self.draw()
+            return self.sweep < self.w + 10
+        for kind, i, v in self.events[self.at:self.at + self.rate]:
+            if kind == "read":
+                self.lit[i] = ACCENT
+            elif kind == "cmp":
+                self.cmps += 1
+                self.lit[i] = self.lit[v] = ACCENT
+            else:
+                self.writes += 1
+                self.a[i] = v
+                self.lit[i] = HI
+        self.at += self.rate
+        if self.at >= len(self.events):
+            self.sweep = 0
+        self.draw()
+        return True
+
+    def bar_tone(self, i):
+        if self.sweep is not None and i < self.sweep:
+            return HI
+        if i in self.lit:
+            return self.lit[i]
+        # by value: darker low, brighter high
+        return self.ramp(0.25 + 0.6 * self.a[i] / self.top)
+
+    def draw(self):
+        rows = self.h - 1  # the top row is the score's
+        eighths = rows * 8
+        for x in range(min(self.w, len(self.a))):
+            hgt = self.a[x] * eighths // self.top
+            tone = self.bar_tone(x)
+            full, part = divmod(hgt, 8)
+            for r in range(rows):
+                y = self.h - 1 - r
+                if r < full:
+                    self.put(x, y, "█", tone)
+                elif r == full and part:
+                    self.put(x, y, PARTS[part], tone)
+                else:
+                    self.put(x, y, " ")
+        self.hud = "%s · %s · %d comparisons · %d writes" % (
+            self.algo, self.input, self.cmps, self.writes)
+
+    def on_resize(self):
+        self.draw()
+
+
+if __name__ == "__main__":
+    main(Sort)
