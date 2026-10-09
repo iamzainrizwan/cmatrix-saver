@@ -576,7 +576,9 @@ if [[ -n ${CMATRIX_SAVER_AWAY:-} ]]; then
   left=${left//#/##}  # tmux formats
   left=${left//%/%%} # strftime: the status bar runs through it
 fi
-# after it, while `m` has notices collapsed, how many there are
+# after it the scene that's running (`s` changes @scene, the bar follows),
+# then, while `m` has notices collapsed, how many there are
+scene='#[fg=#666666]#{@scene}  '
 hidden='#{?#{&&:#{@notices_count},#{==:#{@notices_open},0}},#[fg=#cc2222]#{@notices_count} notice#{?#{==:#{@notices_count},1},,s} #[fg=#444444](m)  ,}'
 
 # notices pane above the scene, made zoomed-away until there's something in
@@ -610,7 +612,7 @@ exec tmux -L "cmatrix-saver-${CMATRIX_SAVER_SLOT:-0}" -f "$conf" \
   set -g status-style 'bg=#000000,fg=#444444' \; \
   set -g status-left-length 80 \; \
   set -g status-right-length 140 \; \
-  set -g status-left "#[fg=#000000,bg=#cc2222,bold] $left #[default] $hidden" \; \
+  set -g status-left "#[fg=#000000,bg=#cc2222,bold] $left #[default] $scene$hidden" \; \
   set -g status-right "#($CMD nowplaying)#[fg=#666666]#($CMD idle)  #($CMD battery)  #[fg=#444444]%a %d %b  #[fg=#cc2222,bold]%H:%M:%S " \; \
   set -g window-status-format '' \; \
   set -g window-status-current-format '' \; \

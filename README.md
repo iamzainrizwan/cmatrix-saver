@@ -15,8 +15,8 @@ itself (see [Scenes](#scenes)). A handful of keys control it while it runs;
 anything else, or moving the mouse, closes it.
 
 - **Primary monitor:** decrypts `<hostname> \\ idle`, then shows a status bar
-  with the hostname, what's playing, idle time, battery (green while plugged
-  in), date and a clock.
+  with the hostname and the scene that's running, what's playing, idle time,
+  battery (green while plugged in), date and a clock.
 - **Other monitors:** decrypt the current time and date, then the same scene
   with no status bar.
 - **Now playing:** the track from whichever media player is playing (Spotify,
