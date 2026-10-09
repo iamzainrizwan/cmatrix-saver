@@ -240,7 +240,11 @@ class Scene:
             left = end - time.monotonic()
             r, _, _ = select.select([sys.stdin], [], [], max(left, 0))
             if r:
-                for ch in os.read(sys.stdin.fileno(), 64).decode(errors="ignore"):
+                got = os.read(sys.stdin.fileno(), 64)
+                if not got:  # no tty any more: sleep rather than spin on it
+                    time.sleep(max(left, 0))
+                    return
+                for ch in got.decode(errors="ignore"):
                     self.key(ch)
             if left <= 0 or not r:
                 return
