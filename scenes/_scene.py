@@ -136,6 +136,19 @@ class Scene:
             self.sgr_cache[key] = s
         return s
 
+    def shift(self, was, now):
+        """The escape from one (fg, bg) to the next: only the half that
+        changed when both are colours, which roughly halves what a screen
+        of shifting colours (plasma) writes."""
+        if was is None or None in was or None in now:
+            return self.sgr(*now)
+        fg, bg = now
+        if was[0] == fg:
+            return "\033[48;2;%d;%d;%dm" % hex_rgb(self.colour(bg))
+        if was[1] == bg:
+            return "\033[38;2;%d;%d;%dm" % hex_rgb(self.colour(fg))
+        return self.sgr(*now)
+
     def hud_row(self):
         """Row 0 with the score drawn over its right-hand end."""
         row = self.cells[0]
@@ -165,7 +178,7 @@ class Scene:
                     parts.append("\033[%d;%dH" % (y + 1, x + 1))
                 st = (c[1], c[2])
                 if st != style:
-                    parts.append(self.sgr(*st))
+                    parts.append(self.shift(style, st))
                     style = st
                 parts.append(c[0])
                 seen[x] = c
