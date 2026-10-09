@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+# cmatrix-saver scene: a maze carves itself out of a solid screen (by one
+# of four algorithms, each with its own look: the backtracker's long
+# corridors, Prim's short branches, Kruskal's patchwork, Wilson's loop-
+# erased random walks), then A* finds the way from the top left to the
+# bottom right, the cells it explored shaded in, and the path is drawn. It
+# holds, dissolves, and the next one starts. Each maze cell is two columns
+# wide so it comes out square. Score: the maze number, explored, path.
+import heapq, os, random, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _scene import Scene, main, HI, MID, LOW, DIM, FAINT, ACCENT  # noqa: E402
+
+WALL, OPEN, WALK, SEEN, EDGE, PATH = "wall", "open", "walk", "seen", "edge", "path"
+LOOK = {  # tone -> (characters, colour)
+    WALL: ("██", DIM),
+    OPEN: ("  ", None),
+    WALK: ("██", LOW),
+    SEEN: ("··", FAINT),
+    EDGE: ("··", MID),
+    PATH: ("██", HI),
+}
+SECONDS = {"carve": 40, "search": 14, "path": 4}  # each phase, at speed 6
+
+
+class Maze(Scene):
+    MAX_GAME = 600  # it always ends by itself
+    HOLD = 3.0
+
+    def __init__(self):
+        self.count = 0
+        super().__init__()
+
+    def new_game(self):
+        self.count += 1
+        mw, mh = self.w // 2, self.h - 1  # the top row is the score's
+        self.mw, self.mh = mw - (mw + 1) % 2, mh - (mh + 1) % 2  # odd
+        self.grid = [[WALL] * self.mw for _ in range(self.mh)]
+        self.algo = random.choice(["backtracker", "prim", "kruskal", "wilson"])
+        self.explored = self.length = 0
+        # carved up front, so the search can run on the finished maze
+        self.carving = list(getattr(self, self.algo)())
+        self.phases = [("carve", self.carving), ("search", self.astar()), ("path", None)]
+        self.next_phase()
+        self.render()
+
+    # -- the phases: each a list of (x, y, tone) played back at a rate that
+    # takes about SECONDS[phase] at the default speed
+
+    def next_phase(self):
+        if not self.phases:
+            return False
+        self.phase, events = self.phases.pop(0)
+        if self.phase == "path":
+            events = [(x, y, PATH) for x, y in self.route]
+        self.events, self.at = list(events), 0
+        frames = SECONDS[self.phase] / self.DELAYS[5]
+        self.rate = max(1, round(len(self.events) / frames))
+        return True
+
+    def rooms(self):
+        return [(x, y) for y in range(1, self.mh, 2) for x in range(1, self.mw, 2)]
+
+    def between(self, a, b):
+        return ((a[0] + b[0]) // 2, (a[1] + b[1]) // 2)
+
+    def around(self, p):
+        for dx, dy in ((2, 0), (-2, 0), (0, 2), (0, -2)):
+            q = (p[0] + dx, p[1] + dy)
+            if 0 < q[0] < self.mw and 0 < q[1] < self.mh:
+                yield q
+
+    def backtracker(self):
+        start = (1, 1)
+        seen, stack = {start}, [start]
+        yield (*start, OPEN)
+        while stack:
+            p = stack[-1]
+            nxt = [q for q in self.around(p) if q not in seen]
+            if not nxt:
+                stack.pop()
+                continue
+            q = random.choice(nxt)
+            seen.add(q)
+            stack.append(q)
+            yield (*self.between(p, q), OPEN)
+            yield (*q, OPEN)
+
+    def prim(self):
+        start = random.choice(self.rooms())
+        inside = {start}
+        frontier = {q: start for q in self.around(start)}
+        yield (*start, OPEN)
+        while frontier:
+            q = random.choice(list(frontier))
+            p = frontier.pop(q)
+            inside.add(q)
+            yield (*self.between(p, q), OPEN)
+            yield (*q, OPEN)
+            for r in self.around(q):
+                if r not in inside and r not in frontier:
+                    frontier[r] = q
+
+    def kruskal(self):
+        parent = {c: c for c in self.rooms()}
+
+        def root(c):
+            while parent[c] != c:
+                parent[c] = parent[parent[c]]
+                c = parent[c]
+            return c
+
+        walls = [(p, q) for p in parent for q in self.around(p) if q > p]
+        random.shuffle(walls)
+        for p, q in walls:
+            a, b = root(p), root(q)
+            if a != b:
+                parent[a] = b
+                yield (*p, OPEN)
+                yield (*self.between(p, q), OPEN)
+                yield (*q, OPEN)
+
+    def wilson(self):
+        cells = self.rooms()
+        random.shuffle(cells)
+        inside = {cells[0]}
+        yield (*cells[0], OPEN)
+        for c in cells:
+            if c in inside:
+                continue
+            # random walk to the maze, erasing loops as it goes
+            walk = [c]
+            yield (*c, WALK)
+            while walk[-1] not in inside:
+                q = random.choice(list(self.around(walk[-1])))
+                if q in walk:
+                    i = walk.index(q)
+                    for r in walk[i + 1:]:
+                        yield (*r, WALL)
+                    for a, b in zip(walk[i:], walk[i + 1:]):
+                        yield (*self.between(a, b), WALL)
+                    del walk[i + 1:]
+                else:
+                    yield (*self.between(walk[-1], q), WALK)
+                    if q not in inside:
+                        yield (*q, WALK)
+                    walk.append(q)
+            for a, b in zip(walk, walk[1:]):
+                yield (*a, OPEN)
+                yield (*self.between(a, b), OPEN)
+            inside.update(walk)
+
+    def astar(self):
+        carved = [[WALL] * self.mw for _ in range(self.mh)]
+        for x, y, tone in self.carving:
+            carved[y][x] = tone
+        start, goal = (1, 1), (self.mw - 2, self.mh - 2)
+        dist = {start: 0}
+        came = {start: None}
+        todo = [(0, start)]
+        events = []
+        while todo:
+            _, p = heapq.heappop(todo)
+            if p == goal:
+                break
+            if p != start:
+                events.append((*p, SEEN))
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                q = (p[0] + dx, p[1] + dy)
+                if carved[q[1]][q[0]] != OPEN or q in dist and dist[q] <= dist[p] + 1:
+                    continue
+                dist[q], came[q] = dist[p] + 1, p
+                h = abs(goal[0] - q[0]) + abs(goal[1] - q[1])
+                heapq.heappush(todo, (dist[q] + h, q))
+                events.append((*q, EDGE))
+        route, p = [], goal
+        while p is not None:
+            route.append(p)
+            p = came.get(p)
+        self.route = route[::-1]
+        self.explored = sum(1 for e in events if e[2] == SEEN)
+        return events
+
+    def tick_events(self):
+        for x, y, tone in self.events[self.at:self.at + self.rate]:
+            self.grid[y][x] = tone
+            self.draw_cell(x, y)
+        self.at += self.rate
+
+    def step(self):
+        if self.at >= len(self.events) and not self.next_phase():
+            return False
+        self.tick_events()
+        if self.phase == "path":
+            self.length = min(self.at, len(self.route))
+        self.hud = "maze %d · %s · explored %d · path %d" % (
+            self.count, self.algo, self.explored if self.phase != "carve" else 0, self.length)
+        return True
+
+    def draw_cell(self, x, y):
+        chars, tone = LOOK[self.grid[y][x]]
+        if (x, y) in ((1, 1), (self.mw - 2, self.mh - 2)) and self.grid[y][x] == OPEN:
+            chars, tone = "██", ACCENT
+        self.put(x * 2 + self.ox, y + 1, chars[0], tone)
+        self.put(x * 2 + self.ox + 1, y + 1, chars[1], tone)
+
+    def render(self):
+        self.ox = (self.w - self.mw * 2) // 2
+        for y in range(self.mh):
+            for x in range(self.mw):
+                self.draw_cell(x, y)
+
+    def on_resize(self):
+        # carry on if it still fits (the notices strip went away), else anew
+        if self.mw * 2 <= self.w and self.mh + 1 <= self.h:
+            self.render()
+        else:
+            self.new_game()
+
+
+if __name__ == "__main__":
+    main(Maze)
