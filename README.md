@@ -265,7 +265,7 @@ Environment=CMATRIX_SAVER_IDLE=600
 |---|---|---|
 | `CMATRIX_SAVER_IDLE` | `300` | seconds of no input before it starts |
 | `CMATRIX_SAVER_TITLE` | `<hostname> \\ idle` | title decrypted on the primary monitor |
-| `CMATRIX_SAVER_GREY` | `0` | `1` maps the window's ANSI green and white to greys, so cmatrix's default green rain shows grey (dark grey trail, off-white heads), whatever your kitty colours are |
+| `CMATRIX_SAVER_GREY` | `0` | `1` maps the window's ANSI green and white to greys, so cmatrix's default green rain shows grey (dark grey trail, off-white heads), whatever your kitty colours are; yellow and cyan go grey too, so pipes doesn't follow kitty either |
 | `CMATRIX_SAVER_NOWPLAYING` | `1` | `0` hides the now-playing track |
 | `CMATRIX_SAVER_LOW_BATTERY` | `20` | at or below this battery %, while discharging, show plain black instead |
 | `CMATRIX_SAVER_SCENES` | all of them | scenes to pick from and cycle through, in order, e.g. `cmatrix snake` |

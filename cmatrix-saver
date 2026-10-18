@@ -115,9 +115,12 @@ launch() {
     -o background_opacity=0 -o dynamic_background_opacity=yes
     -o allow_remote_control=socket-only)
   # cmatrix draws its rain in ANSI green and its heads in white: optionally
-  # map them to dark/mid grey and off-white, whatever kitty.conf says
+  # map them to dark/mid grey and off-white, whatever kitty.conf says. Yellow
+  # and cyan go grey too, so pipes' colours don't follow kitty.conf either.
   [[ ${CMATRIX_SAVER_GREY:-0} == 1 ]] && common+=(
     -o color2=#333333 -o color10=#666666
+    -o color3=#444444 -o color11=#666666
+    -o color6=#333333 -o color14=#666666
     -o color7=#e0e0e0 -o foreground=#e0e0e0)
   local mons x y primary n=0
   [[ ${CMATRIX_SAVER_SINGLE:-0} == 1 ]] || mapfile -t mons < <(monitors)
