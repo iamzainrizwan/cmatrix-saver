@@ -95,6 +95,19 @@ for x, y, _scale, _transform, primary, *_ in state[2]:
 EOF
 }
 
+# Windows mapped while the Activities overview is open just join it as
+# thumbnails and never get focus, so the saver sat behind the overview
+# with keys going nowhere. Close it first (OverviewActive is writable over
+# D-Bus, unlike Eval) and give its hide animation time to finish.
+overview_off() {
+  local prop=(--session --dest org.gnome.Shell --object-path /org/gnome/Shell)
+  gdbus call "${prop[@]}" --method org.freedesktop.DBus.Properties.Get \
+    org.gnome.Shell OverviewActive 2>/dev/null | grep -q true || return 0
+  gdbus call "${prop[@]}" --method org.freedesktop.DBus.Properties.Set \
+    org.gnome.Shell OverviewActive '<false>' >/dev/null 2>&1
+  sleep 0.4
+}
+
 pick_scene() {
   local pool
   mapfile -t pool < <("$SCENE" scenes)
@@ -104,6 +117,7 @@ pick_scene() {
 
 launch() {
   rm -f "$RUN/key" "$RUN/quit"
+  overview_off
   launched=$(date +%s%3N)
   # notices only count from now: Mutter's idle time also covers you reading
   # the screen, so anything before the saver covered it you may have seen
