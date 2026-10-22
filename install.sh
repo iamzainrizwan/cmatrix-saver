@@ -40,7 +40,13 @@ install_() {
       install -m755 "$f" "$CONF/$f"
     fi
   done
-  unit >"$UNIT/cmatrix-saver.service"
+  # a symlinked unit is managed elsewhere (e.g. a dotfiles repo); writing
+  # through it would clobber that copy
+  if [[ -L $UNIT/cmatrix-saver.service ]]; then
+    echo "keeping symlinked $UNIT/cmatrix-saver.service"
+  else
+    unit >"$UNIT/cmatrix-saver.service"
+  fi
   systemctl --user daemon-reload
   systemctl --user enable cmatrix-saver
   systemctl --user restart cmatrix-saver
