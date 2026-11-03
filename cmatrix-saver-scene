@@ -321,6 +321,7 @@ rain() {
   # palette colours only: red, blue, magenta, white (pipes' own list has
   # black, invisible here, and green)
   pipes) cmd=("$(command -v pipes.sh || command -v pipes)" -p 4 -R -r 0 -c 1 -c 4 -c 5 -c 7) ;;
+  bday) cmd=("$(for d in "$(dirname "$SELF")/scenes" "${XDG_CONFIG_HOME:-$HOME/.config}/cmatrix-saver/scenes"; do [[ -x $d/_bday ]] && echo "$d/_bday"; done | head -1)") ;;
   *) cmd=("$(scene_files | grep "/$scene\$" | tail -1)") ;;
   esac
   if ! command -v "${cmd[0]}" >/dev/null; then

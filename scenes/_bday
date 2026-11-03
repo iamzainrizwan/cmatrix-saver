@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+# cmatrix-saver scene (not in the rotation: the saver picks it on one day a
+# year). Rain that leaves a message behind: a drop that lands on one of its
+# letters lights it and it stays. Then it all dissolves and starts again.
+import os, random, sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from _scene import Scene, main, HI, MID, LOW, DIM, FAINT, ACCENT  # noqa: E402
+
+MESSAGE = "happy birthday zain"
+GLYPHS = "01234567890ABCDEFabcdef$#%&*+=<>/|[]{}"
+TRAIL = [MID, MID, LOW, LOW, DIM, DIM, FAINT]
+
+
+class Bday(Scene):
+    DELAYS = [0.2, 0.15, 0.11, 0.08, 0.06, 0.045, 0.033, 0.022, 0.012]
+    MAX_GAME = 120
+    HOLD = 1.5
+
+    def new_game(self):
+        self.my = self.h // 2
+        self.mx = max((self.w - len(MESSAGE)) // 2, 0)
+        self.todo = {(self.mx + i, self.my): ch for i, ch in enumerate(MESSAGE)
+                     if ch != " " and self.mx + i < self.w}
+        self.lit = {}
+        self.tick = 0
+        self.after = 0
+        self.heads = [random.randint(-self.h, 0) for _ in range(self.w)]
+        self.lens = [random.randint(6, 18) for _ in range(self.w)]
+        self.every = [random.choice([1, 1, 2, 2, 3]) for _ in range(self.w)]
+
+    def on_resize(self):
+        self.new_game()
+
+    def step(self):
+        self.tick += 1
+        self.clear()
+        for x in range(self.w):
+            if self.tick % self.every[x] == 0:
+                self.heads[x] += 1
+                if self.heads[x] - self.lens[x] > self.h:
+                    self.heads[x] = random.randint(-self.h // 2, 0)
+                    self.lens[x] = random.randint(6, 18)
+                    self.every[x] = random.choice([1, 1, 2, 2, 3])
+            hy = self.heads[x]
+            if (x, hy) in self.todo:
+                self.lit[(x, hy)] = self.todo.pop((x, hy))
+            for d in range(self.lens[x]):
+                y = hy - d
+                if 0 <= y < self.h:
+                    shade = HI if d == 0 else TRAIL[min(d - 1, len(TRAIL) - 1)]
+                    self.put(x, y, random.choice(GLYPHS), shade)
+        for (x, y), ch in self.lit.items():
+            self.put(x, y, ch, ACCENT)
+        if not self.todo:
+            self.after += 1
+            return self.after < 80
+        return True
+
+
+if __name__ == "__main__":
+    main(Bday)

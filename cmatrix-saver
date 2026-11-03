@@ -110,6 +110,10 @@ overview_off() {
 
 pick_scene() {
   local pool
+  if [[ ${BDAY_FORCE:-} == 1 || $(date +%m%d) == 1114 ]]; then
+    echo bday
+    return
+  fi
   mapfile -t pool < <("$SCENE" scenes)
   ((${#pool[@]})) || pool=(cmatrix)
   echo "${pool[RANDOM % ${#pool[@]}]}"
