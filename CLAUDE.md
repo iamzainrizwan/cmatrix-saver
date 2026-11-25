@@ -1,8 +1,7 @@
 # CLAUDE.md
 
 Guidance for Claude Code in this repo. Public repo that runs only on Zain's machine: commit and push
-straight to main, no PRs or worktree branches left behind (an unmerged worktree branch once held the
-title-centre fix and the bug came back).
+straight to main, no PRs or worktree branches left behind.
 
 ## Install and layout
 

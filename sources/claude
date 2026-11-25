@@ -11,6 +11,7 @@
 #
 # UserPromptSubmit logs "busy", which hides the session again: you've
 # answered it, from wherever.
+import fcntl
 import json, os, sys, time
 
 RUN = os.environ.get("CMATRIX_SAVER_RUN") or "%s/cmatrix-saver-%d" % (
@@ -35,17 +36,20 @@ def hook():
     cwd = (d.get("cwd") or "").split("/.claude/worktrees/")[0]
     msg = (d.get("message") or "") if kind == "input" else ""
     os.makedirs(RUN, exist_ok=True)
-    with open(LOG, "a") as f:
-        f.write("\t".join([str(int(time.time() * 1000)), kind, clean(d.get("session_id", "")),
-                           clean(os.path.basename(cwd) or "?"), clean(msg)]) + "\n")
-    # keep it short: the saver only ever needs the last few hours
-    with open(LOG) as f:
-        lines = f.readlines()
-    if len(lines) > 500:
-        tmp = f"{LOG}.{os.getpid()}"  # two hooks trimming at once don't share it
-        with open(tmp, "w") as f:
-            f.writelines(lines[-200:])
-        os.replace(tmp, LOG)
+    # one hook at a time: a line appended while another hook trims would be lost
+    with open(f"{LOG}.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(LOG, "a") as f:
+            f.write("\t".join([str(int(time.time() * 1000)), kind, clean(d.get("session_id", "")),
+                               clean(os.path.basename(cwd) or "?"), clean(msg)]) + "\n")
+        # keep it short: the saver only ever needs the last few hours
+        with open(LOG) as f:
+            lines = f.readlines()
+        if len(lines) > 500:
+            tmp = f"{LOG}.tmp"
+            with open(tmp, "w") as f:
+                f.writelines(lines[-200:])
+            os.replace(tmp, LOG)
 
 
 def list_(since):
